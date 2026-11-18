@@ -2,6 +2,57 @@
 
 Newest session first. Each entry: done, in progress, known issues, next steps.
 
+## Session 4 (2026-11-18): timeline, fault schedules, cancellation checks, more findings
+
+### Done
+- **HTML timeline** (`simloop.save_html`, `--html` on `run`/`replay`/
+  `explore`, `--simloop-html DIR` in pytest): per-host and per-task lanes,
+  message arrows from send to `recv`, crash/pause spans, kind filters, zoom
+  and a click-through event list, self-contained. **README GIF**
+  (`scripts/render_gif.py`) drawn from a real shrunk run with the same model.
+- **Declarative fault schedules** (`faults.schedule(at/during/between/every
+  ...)`) with seeded ranges and `any_of` targets; partitions are reference
+  counted so overlapping windows compose.
+- **`stable_hash`**: identity-hashed classes kept in sets hash by first-use
+  order inside a run (anyio's `CancelScope` is patched automatically). Fixed
+  anyio runs that never reproduced.
+- **`SimConfig(strict_cancellation=True)`**: fails a run when a task keeps
+  running with a cancel request nobody `uncancel()`ed and then finishes
+  normally. No hits on SimLoop's own machinery or any existing harness except
+  the aiotools bug below; catch-alls that end the task in the same step are
+  exempt (uvicorn's `run_asgi` does that).
+- **Shrinking**: candidates get a step budget of 10x the failing run, are cut
+  off once they spend far longer at one instant than the failing run did,
+  and skip the trace digest. A CPython 3.11 deadlock that took 500 s of
+  zero-time spinning candidates now shrinks in 17 s; the test suite went from
+  15 s to 8 s.
+- Tasks that cleanup cannot finish are closed while the run is active, so
+  their `finally` blocks no longer print "Exception ignored" noise into later
+  runs.
+- **Findings**: CPython 3.11 `wait_for` + `Condition` lets a second task into
+  the lock (confirmed on real 3.11.1-3.11.18, fixed in 3.12 by the
+  `wait_for` rewrite; CI checks it on 3.11). aiotools 2.2.4 `TaskScope`
+  timeouts leak a cancel request, which makes a later failing `TaskGroup`
+  cancel the task on 3.13+ (confirmed, not reported). aiometer 1.0.0
+  `run_any` waits for every function (suspected). Clean: anyio primitives,
+  uvicorn + Starlette + httpx, aiometer meters.
+- 229 tests on 3.11 to 3.13.
+
+### In progress
+- Nothing half-done.
+
+### Known issues
+- `strict_cancellation` cannot tell a leak from code that deliberately
+  swallows `CancelledError` and keeps going; that is why it is opt-in.
+- `RandomScheduler.pick` and `PCTScheduler.pick` are O(batch).
+- TLS and Unix sockets are not simulated.
+
+### Next steps
+1. More M9 harnesses: asyncstdlib, cashews, tenacity/backoff, aiohttp and
+   websockets server shutdown.
+2. Coverage- or novelty-guided seed exploration (M8, optional).
+3. Run every findings harness with `strict_cancellation=True` in CI.
+
 ## Session 3 (2026-11-18): fidelity, PCT, parallel runs, more findings
 
 ### Done

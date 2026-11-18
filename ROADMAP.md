@@ -92,13 +92,13 @@ met; `docs/PROGRESS.md` has the session-by-session log.
 
 ## M9: Real-world validation
 - [ ] Harnesses for popular async libraries (done so far: aiojobs,
-      async-lru, redis-py asyncio, aiorwlock, aiolimiter, aiocache; aiohttp, httpx and websockets
-      run under SimLoop but have no property harness yet) (candidates: `aiohttp`,
-      `httpx`/`anyio`, `redis` asyncio client with a simulated server,
-      `aiokafka`-style clients, `asyncpg`-style pools, `aiocache`,
-      `tenacity`/`backoff` retry logic, `aiolimiter`)
+      async-lru, redis-py asyncio, aiorwlock, aiolimiter, aiocache, aiohttp,
+      httpx/httpcore, websockets, anyio, uvicorn + Starlette, aiotools,
+      aiometer, CPython asyncio primitives) (candidates: `asyncstdlib`,
+      `cashews`, `tenacity`/`backoff` retry logic, `aiokafka`-style clients,
+      `asyncpg`-style pools)
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed (2 confirmed, 1 suspected,
-      2 false positives, 6 clean harnesses so far)
+      false positives, each with a reproduction script and seed (4 confirmed, 2 suspected,
+      2 false positives, 9 clean harnesses so far)
 - [x] README findings section lists only confirmed results
