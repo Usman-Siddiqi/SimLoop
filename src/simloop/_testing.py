@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, TypeVar, overload
 
 from ._explore import explore
+from ._html import save_html
 from ._repro import Reproduction
 from ._runtime import RunResult, SimConfig, run
 from ._shrink import shrink
@@ -51,6 +52,8 @@ class TestSettings:
     confirm: int = 200
     """Seeds to search with asyncio's own callback order when a failure is
     found under the random scheduler; 0 skips the check."""
+    html: Path | None = None
+    """Directory to write an HTML timeline of each failing test's run into."""
     workers: int | None = None
     """Worker processes for exploration; 0 means one per CPU. Overrides the
     decorator's ``workers``."""
@@ -138,6 +141,7 @@ def _describe(
     shrunk_summary: str | None,
     trace_last: int,
 ) -> str:
+    timeline = _write_timeline(result)
     failure = result.failure
     assert failure is not None
     lines = [
@@ -147,11 +151,23 @@ def _describe(
     if shrunk_summary is not None:
         lines.append(f"  {shrunk_summary}")
     lines.append(f"  reproduce: {_reproduce_hint(result.seed)}")
+    if timeline is not None:
+        lines.append(f"  timeline: {timeline}")
     if result.replayed:
         lines.append("  (the shown run is the shrunk one; it is saved in the example database)")
     if result.trace.keep and trace_last:
         lines += ["", f"Last {trace_last} trace events:", result.trace.format(last=trace_last)]
     return "\n".join(lines)
+
+
+def _write_timeline(result: RunResult[Any]) -> Path | None:
+    if settings.html is None or not result.trace.keep:
+        return None
+    current = os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" ", 1)[0] or "simloop-test"
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in current)
+    return save_html(
+        result, settings.html / f"{safe[-120:]}.html", title=f"{current}, seed {result.seed}"
+    )
 
 
 @overload

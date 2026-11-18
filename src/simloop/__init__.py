@@ -3,6 +3,7 @@
 from . import faults
 from ._choices import ChoiceSource
 from ._explore import ExploreReport, FailureGroup, confirm_feasible, explore
+from ._html import render_html, save_html
 from ._loop import SimEventLoop
 from ._properties import Property
 from ._repro import Reproduction
@@ -83,8 +84,10 @@ __all__ = [
     "log",
     "network",
     "now",
+    "render_html",
     "rng",
     "run",
+    "save_html",
     "shrink",
     "test",
 ]

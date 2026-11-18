@@ -142,6 +142,12 @@ class StreamTransport(asyncio.Transport):
     def _label(self) -> str:
         return f"{self._local[0]}:{self._local[1]} -> {self._remote[0]}:{self._remote[1]}"
 
+    @property
+    def _incoming_label(self) -> str:
+        # Same direction string as the sender's "send" event, so a timeline
+        # can pair them.
+        return f"{self._remote[0]}:{self._remote[1]} -> {self._local[0]}:{self._local[1]}"
+
     def _socket_readable(self) -> bool:
         # Data is handed to the protocol as soon as it arrives, so the kernel
         # buffer only holds what is waiting while reading is paused, or the
@@ -355,6 +361,9 @@ class StreamTransport(asyncio.Transport):
             return
         if kind == "data":
             assert isinstance(protocol, asyncio.Protocol)
+            self._network._record(
+                self._host.name, "recv", f"{self._incoming_label} {len(payload)}B"
+            )
             protocol.data_received(payload)
         elif kind == "fin":
             self._eof_received = True
@@ -651,6 +660,9 @@ class DatagramEndpoint(asyncio.DatagramTransport):
             return
         if self._remote is not None and source != self._remote:
             return
+        self._network._record(
+            self._host.name, "recv", f"{source} -> {(self._host.ip, self._port)} {len(payload)}B"
+        )
         self._loop.call_soon(
             self._protocol.datagram_received,
             payload,

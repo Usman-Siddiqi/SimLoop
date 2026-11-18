@@ -395,13 +395,12 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             task = factory(self, coro) if context is None else factory(self, coro, context=context)
             task.set_name(name)
         self._tasks[task] = False
-        if self.network is not None:
-            self.network._adopt(task, context)
+        host = self.network._adopt(task, context) if self.network is not None else None
         parent = asyncio.current_task(self)
         self._record(
             "spawn",
             parent.get_name() if parent is not None else "loop",
-            f"{name} {_coro_name(coro)}",
+            f"{name} {_coro_name(coro)}" + (f" @{host}" if host else ""),
         )
         return task
 

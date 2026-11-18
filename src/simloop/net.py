@@ -290,10 +290,13 @@ class Network:
         host._held_handles.append(handle)
         return True
 
-    def _adopt(self, task: asyncio.Task[Any], context: contextvars.Context | None) -> None:
+    def _adopt(self, task: asyncio.Task[Any], context: contextvars.Context | None) -> str | None:
+        """Attach ``task`` to the host it was created on; returns the host name."""
         host = context.get(_current_host) if context is not None else _current_host.get()
         if host is not None and host.network is self:
             host._adopt(task)
+            return host.name
+        return None
 
     # -- links and partitions ---------------------------------------------------------
 

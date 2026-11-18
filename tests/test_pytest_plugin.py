@@ -181,3 +181,11 @@ def test_pytest_plugin_end_to_end(pytester: pytest.Pytester) -> None:
     no_db.assert_outcomes(failed=1)
     assert "SimLoop: a remembered failure" not in no_db.stdout.str()
     assert "shrunk in" not in no_db.stdout.str()
+
+    timelines = pytester.path / "timelines"
+    html = pytester.runpytest_subprocess(
+        "-k", "racy", "--simloop-no-db", "--simloop-html", str(timelines)
+    )
+    html.assert_outcomes(failed=1)
+    html.stdout.fnmatch_lines(["*timeline: *test_racy*.html*"])
+    assert len(list(timelines.glob("*test_racy*.html"))) == 1

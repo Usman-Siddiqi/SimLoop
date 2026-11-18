@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ._explore import FailureGroup, explore
+from ._html import save_html
 from ._repro import Reproduction
 from ._runtime import MainFunction, RunResult, SimConfig, run
 from ._selfcheck import check_determinism
@@ -111,11 +112,17 @@ def _shrink_and_save(
     return shown
 
 
+def _write_html(result: RunResult[Any], path: str | Path, title: str) -> None:
+    print(f"timeline: {save_html(result, path, title=title)}")
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     main = load_target(args.target)
     result = run(main, seed=args.seed, config=_config(args))
     if not result.ok:
         result = _shrink_and_save(args, main, result)
+    if args.html:
+        _write_html(result, args.html, f"{args.target}, seed {result.seed}")
     if args.trace:
         print(result.trace.format())
         print()
@@ -149,6 +156,12 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     for group in report.groups:
         print(f"\nreproduce [{group.kind}]: {_reproduce_command(args, group.seeds[0])}")
     shown = [_explain_group(args, main, group) for group in report.groups]
+    if args.html:
+        for index, (group, example) in enumerate(zip(report.groups, shown, strict=True), 1):
+            if example is not None:
+                name = f"group-{index}-seed-{example.seed}.html"
+                title = f"{args.target}, group {index} ({group.kind}), seed {example.seed}"
+                _write_html(example, Path(args.html) / name, title)
     first = shown[0]
     if first is not None and args.trace_last:
         print()
@@ -183,6 +196,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     if target is None:
         raise SystemExit("error: the reproduction names no target; pass --target")
     result = repro.run(load_target(target))
+    if args.html:
+        _write_html(result, args.html, f"{target}, replay of seed {result.seed}")
     if args.trace:
         print(result.trace.format())
         print()
@@ -233,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = sub.add_parser("run", parents=[common, found], help="run one seed")
     run_parser.add_argument("--seed", type=int, default=0)
     run_parser.add_argument("--trace", action="store_true", help="print the full trace")
+    run_parser.add_argument("--html", metavar="FILE", help="write an HTML timeline of the run")
     run_parser.set_defaults(handler=_cmd_run)
 
     explore_parser = sub.add_parser("explore", parents=[common, found], help="run many seeds")
@@ -253,6 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="worker processes (0: one per CPU); the report does not depend on it",
     )
+    explore_parser.add_argument(
+        "--html", metavar="DIR", help="write an HTML timeline of each failure group's example"
+    )
     explore_parser.set_defaults(handler=_cmd_explore)
 
     check_parser = sub.add_parser(
@@ -267,6 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("file", help="JSON file written by --save")
     replay_parser.add_argument("--target", default=None, help="override the saved target")
     replay_parser.add_argument("--trace", action="store_true", help="print the full trace")
+    replay_parser.add_argument("--html", metavar="FILE", help="write an HTML timeline of the run")
     replay_parser.add_argument("--trace-last", type=int, default=30)
     replay_parser.set_defaults(handler=_cmd_replay)
     return parser

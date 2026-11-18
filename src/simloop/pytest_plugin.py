@@ -38,6 +38,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="worker processes per @simloop.test exploration (0: one per CPU)",
     )
     group.addoption(
+        "--simloop-html",
+        metavar="DIR",
+        default=None,
+        help="write an HTML timeline of each failing run into DIR",
+    )
+    group.addoption(
         "--simloop-trace-last", type=int, default=30, help="trace events shown on failure"
     )
 
@@ -51,6 +57,8 @@ def pytest_configure(config: pytest.Config) -> None:
     settings.trace_last = config.getoption("simloop_trace_last")
     settings.confirm = config.getoption("simloop_confirm")
     settings.workers = config.getoption("simloop_workers")
+    html = config.getoption("simloop_html")
+    settings.html = None if html is None else Path(html)
     root = Path(config.rootpath)
     settings.database = (
         None if config.getoption("simloop_no_db") else root / ".simloop" / "examples"
