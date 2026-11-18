@@ -157,6 +157,7 @@ def test_crash_recovery_bug_is_found_by_nemesis() -> None:
                 assert int(reply) >= acknowledged, (
                     f"acknowledged {acknowledged}, server says {int(reply)}"
                 )
+        nemesis.cancel()
 
     report = simloop.explore(workload, seeds=range(20))
     assert not report.ok
