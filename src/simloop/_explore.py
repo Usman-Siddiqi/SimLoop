@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import itertools
+import multiprocessing
+import os
 import time
-from collections.abc import Callable, Iterable
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from ._runtime import MainFunction, RunResult, SimConfig, run
 from ._selfcheck import Divergence, check_determinism
@@ -43,6 +48,7 @@ class ExploreReport:
     sim_time: float
     steps: int
     stopped_early: bool = False
+    workers: int = 1
 
     @property
     def failed(self) -> int:
@@ -60,7 +66,8 @@ class ExploreReport:
         lines = [
             f"{self.runs} runs, {self.passed} passed, {self.failed} failed "
             f"in {self.wall_time:.2f}s ({rate:.0f} runs/s, "
-            f"{self.sim_time:.1f}s simulated, {self.steps} steps)"
+            f"{self.sim_time:.1f}s simulated, {self.steps} steps"
+            + (f", {self.workers} workers)" if self.workers > 1 else ")")
         ]
         if self.stopped_early:
             lines.append("stopped early: failure limit reached")
@@ -93,6 +100,102 @@ class ExploreReport:
         return "\n".join(lines)
 
 
+class _Outcome(NamedTuple):
+    """What exploration needs from one run; small and always picklable."""
+
+    seed: int
+    steps: int
+    sim_time: float
+    digest: str
+    kind: str | None
+    message: str
+    signature: str | None
+
+    @classmethod
+    def of(cls, result: RunResult[Any]) -> _Outcome:
+        failure = result.failure
+        return cls(
+            result.seed,
+            result.steps,
+            result.sim_time,
+            result.digest,
+            failure.kind if failure else None,
+            failure.message if failure else "",
+            failure.signature if failure else None,
+        )
+
+
+_worker_target: tuple[MainFunction[Any], SimConfig] | None = None
+
+
+def _init_worker(main: MainFunction[Any], config: SimConfig) -> None:
+    global _worker_target
+    _worker_target = (main, config)
+
+
+def _run_chunk(seeds: list[int]) -> list[_Outcome]:
+    assert _worker_target is not None
+    main, config = _worker_target
+    return [_Outcome.of(run(main, seed=seed, config=config)) for seed in seeds]
+
+
+def resolve_workers(workers: int | None) -> int:
+    """``None`` or 0 means one worker per CPU."""
+    if workers is None or workers == 0:
+        return os.cpu_count() or 1
+    if workers < 0:
+        raise ValueError("workers must be positive, or 0 for one per CPU")
+    return workers
+
+
+def _pool_context() -> Any:
+    # Fork lets workers inherit closures, such as the body of a @simloop.test,
+    # which spawn could not pickle. Where fork is missing, main must be a
+    # module-level function.
+    methods = multiprocessing.get_all_start_methods()
+    return multiprocessing.get_context("fork" if "fork" in methods else "spawn")
+
+
+def _chunks(seeds: Iterable[int], size: int) -> Iterator[list[int]]:
+    iterator = iter(seeds)
+    while chunk := list(itertools.islice(iterator, size)):
+        yield chunk
+
+
+def _parallel_outcomes(
+    main: MainFunction[Any],
+    seeds: Iterable[int],
+    config: SimConfig,
+    workers: int,
+    chunk_size: int,
+    out_of_time: Callable[[], bool],
+) -> Iterator[_Outcome]:
+    """Outcomes in seed order, whatever order the workers finish in.
+
+    Closing the generator early (a failure limit) cancels the queued chunks.
+    """
+    pool = ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=_pool_context(),
+        initializer=_init_worker,
+        initargs=(main, config),
+    )
+    pending: deque[Future[list[_Outcome]]] = deque()
+    chunks = _chunks(seeds, chunk_size)
+    try:
+        while True:
+            while len(pending) < workers * 4 and not out_of_time():
+                chunk = next(chunks, None)
+                if chunk is None:
+                    break
+                pending.append(pool.submit(_run_chunk, chunk))
+            if not pending:
+                return
+            yield from pending.popleft().result()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def explore(
     main: MainFunction[Any],
     *,
@@ -102,6 +205,8 @@ def explore(
     time_budget: float | None = None,
     on_result: Callable[[RunResult[Any]], None] | None = None,
     confirm: int = 0,
+    workers: int | None = 1,
+    chunk_size: int = 8,
 ) -> ExploreReport:
     """Run ``main`` once per seed and group failures by signature.
 
@@ -109,12 +214,21 @@ def explore(
     of each group is rerun with a full trace, which doubles as a check that the
     failure reproduces exactly.
 
+    With ``workers`` > 1 (0 or ``None`` for one per CPU), seeds run in worker
+    processes in chunks of ``chunk_size``. Results are consumed in seed order,
+    so the report is the same as a sequential one, except that a
+    ``time_budget`` may cut at a different seed. ``on_result`` needs the full
+    result of every run and is only allowed with one worker.
+
     With ``confirm`` > 0, each group found under a non-FIFO scheduler is
     searched for in up to that many seeds with asyncio's own callback order
     (see :func:`confirm_feasible`), and the result is stored on the group.
     """
     base = config or SimConfig()
     fast = base.replace(keep_trace=False)
+    count = resolve_workers(workers)
+    if count > 1 and on_result is not None:
+        raise ValueError("on_result needs workers=1")
     groups: dict[str, FailureGroup] = {}
     digests: dict[str, str] = {}
     runs = passed = steps = 0
@@ -122,30 +236,48 @@ def explore(
     stopped_early = False
     started = _wall_clock()
 
-    for seed in seeds:
-        if time_budget is not None and _wall_clock() - started >= time_budget:
-            break
-        result = run(main, seed=seed, config=fast)
-        runs += 1
-        steps += result.steps
-        sim_time += result.sim_time
-        if on_result is not None:
-            on_result(result)
-        if result.failure is None:
-            passed += 1
-            continue
-        failure = result.failure
-        group = groups.get(failure.signature)
-        if group is None:
-            group = groups[failure.signature] = FailureGroup(
-                failure.signature, failure.kind, failure.message
-            )
-            digests[failure.signature] = result.digest
-        group.seeds.append(seed)
-        failures = runs - passed
-        if max_failures is not None and failures >= max_failures:
-            stopped_early = True
-            break
+    def out_of_time() -> bool:
+        return time_budget is not None and _wall_clock() - started >= time_budget
+
+    outcomes: Iterator[_Outcome]
+    if count > 1:
+        outcomes = _parallel_outcomes(main, seeds, fast, count, chunk_size, out_of_time)
+    else:
+
+        def sequential() -> Iterator[_Outcome]:
+            for seed in seeds:
+                if out_of_time():
+                    return
+                result = run(main, seed=seed, config=fast)
+                if on_result is not None:
+                    on_result(result)
+                yield _Outcome.of(result)
+
+        outcomes = sequential()
+
+    try:
+        for outcome in outcomes:
+            runs += 1
+            steps += outcome.steps
+            sim_time += outcome.sim_time
+            if outcome.signature is None:
+                passed += 1
+                continue
+            assert outcome.kind is not None
+            group = groups.get(outcome.signature)
+            if group is None:
+                group = groups[outcome.signature] = FailureGroup(
+                    outcome.signature, outcome.kind, outcome.message
+                )
+                digests[outcome.signature] = outcome.digest
+            group.seeds.append(outcome.seed)
+            if max_failures is not None and runs - passed >= max_failures:
+                stopped_early = True
+                break
+    finally:
+        close = getattr(outcomes, "close", None)
+        if close is not None:
+            close()
 
     # Rates in the summary describe exploration, not the follow-up checks.
     explore_time = _wall_clock() - started
@@ -173,6 +305,7 @@ def explore(
         sim_time=sim_time,
         steps=steps,
         stopped_early=stopped_early,
+        workers=count,
     )
 
 

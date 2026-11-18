@@ -136,6 +136,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         max_failures=args.max_failures,
         time_budget=args.time_budget,
         confirm=args.confirm,
+        workers=args.workers,
     )
     print(report.summary())
     if report.ok:
@@ -236,6 +237,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="seeds to search with asyncio's own order for each random-scheduler failure (0: skip)",
+    )
+    explore_parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=1,
+        help="worker processes (0: one per CPU); the report does not depend on it",
     )
     explore_parser.set_defaults(handler=_cmd_explore)
 

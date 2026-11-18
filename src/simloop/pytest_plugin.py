@@ -32,6 +32,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="fifo seeds searched to confirm a random-scheduler failure (0: skip)",
     )
     group.addoption(
+        "--simloop-workers",
+        type=int,
+        default=None,
+        help="worker processes per @simloop.test exploration (0: one per CPU)",
+    )
+    group.addoption(
         "--simloop-trace-last", type=int, default=30, help="trace events shown on failure"
     )
 
@@ -44,6 +50,7 @@ def pytest_configure(config: pytest.Config) -> None:
     settings.shrink = False if config.getoption("simloop_no_shrink") else None
     settings.trace_last = config.getoption("simloop_trace_last")
     settings.confirm = config.getoption("simloop_confirm")
+    settings.workers = config.getoption("simloop_workers")
     root = Path(config.rootpath)
     settings.database = (
         None if config.getoption("simloop_no_db") else root / ".simloop" / "examples"

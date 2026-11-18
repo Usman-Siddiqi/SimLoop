@@ -32,6 +32,7 @@ F = TypeVar("F", bound=Callable[..., Coroutine[Any, Any, Any]])
 DEFAULT_SEEDS = 100
 _SEEDS_ENV = "SIMLOOP_SEEDS"
 _SEED_ENV = "SIMLOOP_SEED"
+_WORKERS_ENV = "SIMLOOP_WORKERS"
 
 
 @dataclass
@@ -50,6 +51,9 @@ class TestSettings:
     confirm: int = 200
     """Seeds to search with asyncio's own callback order when a failure is
     found under the random scheduler; 0 skips the check."""
+    workers: int | None = None
+    """Worker processes for exploration; 0 means one per CPU. Overrides the
+    decorator's ``workers``."""
 
 
 settings = TestSettings()
@@ -68,6 +72,13 @@ class SimulationFailed(AssertionError):
 def _env_int(name: str) -> int | None:
     value = os.environ.get(name)
     return int(value) if value else None
+
+
+def _pick_workers(default: int) -> int:
+    if settings.workers is not None:
+        return settings.workers
+    from_env = _env_int(_WORKERS_ENV)
+    return from_env if from_env is not None else default
 
 
 def _test_key(fn: Callable[..., Any]) -> str:
@@ -155,6 +166,7 @@ def test(
     shrink_failures: bool = ...,
     max_failures: int | None = ...,
     time_budget: float | None = ...,
+    workers: int = ...,
 ) -> Callable[[F], Callable[..., None]]: ...
 
 
@@ -165,6 +177,7 @@ def test(
     shrink_failures: bool = True,
     max_failures: int | None = 1,
     time_budget: float | None = None,
+    workers: int = 1,
 ) -> Any:
     """Run an async test under SimLoop for many seeds.
 
@@ -179,6 +192,10 @@ def test(
     example database remembers), shrinks it, and raises
     :class:`SimulationFailed` with the seed and a trace tail. Arguments of the
     decorated function are passed through, so pytest fixtures work.
+
+    ``workers`` > 1 explores in that many processes (0: one per CPU); the
+    outcome does not depend on it. ``--simloop-workers`` or
+    ``SIMLOOP_WORKERS`` overrides it.
     """
 
     if inspect.iscoroutinefunction(seeds):
@@ -207,6 +224,7 @@ def test(
                 shrink_failures=shrink_failures,
                 max_failures=max_failures,
                 time_budget=time_budget,
+                workers=workers,
             )
 
         # pytest must call the sync wrapper, not treat it as a coroutine test.
@@ -230,6 +248,7 @@ def _run_test(
     shrink_failures: bool,
     max_failures: int | None,
     time_budget: float | None,
+    workers: int = 1,
 ) -> None:
     __tracebackhide__ = True
     single = settings.seed if settings.seed is not None else _env_int(_SEED_ENV)
@@ -280,6 +299,7 @@ def _run_test(
         max_failures=max_failures,
         time_budget=time_budget,
         confirm=settings.confirm,
+        workers=_pick_workers(workers),
     )
     if report.ok:
         database.store([])
