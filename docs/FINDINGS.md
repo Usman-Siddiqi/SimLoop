@@ -67,6 +67,46 @@ here. Rules (see `CLAUDE.md`):
   is in a release yet. Listed here as a rediscovery from a generic property,
   not as a new report.
 
+### 3. CPython 3.11 asyncio: cancelling `wait_for` mid-timeout releases another task's lock
+
+- **Library:** CPython `asyncio`, 3.11.1 through 3.11.18 (tested 3.11.1,
+  3.11.4, 3.11.7, 3.11.9, 3.11.18). Not affected: 3.12.0 and 3.13.
+- **Reproduction:** [`findings/cpython311_wait_for_lock.py`](../findings/cpython311_wait_for_lock.py)
+  (plain-asyncio reproduction plus the SimLoop harness; CI runs it on 3.11,
+  where it must reproduce, and on 3.13, where it must not).
+- **Seeds:** on 3.11.18, fails on 223 of seeds 0-999 with the default
+  settings (first failing seed 2) and on 247 of 1000 with
+  `scheduler="fifo", timer_jitter=0.001` (first failing seed 2). Two
+  signatures: `RuntimeError: Lock is not acquired.` and a second task inside
+  the lock (first seed 5 under FIFO).
+- **Property violated:** at most one task is inside `async with cond`, and
+  the lock is free once every task has finished.
+- **How it was found:** a generic workload over stdlib primitives
+  (producers and consumers doing
+  `async with cond: await asyncio.wait_for(cond.wait_for(pred), t)`)
+  deadlocked on 3.11 only. Shrinking it is what exposed the shrinker
+  problem fixed in `8a48f64`.
+- **Explanation:** 3.11's `wait_for` runs its awaitable in a separate inner
+  task. On timeout it cancels that task and waits for it in
+  `_cancel_and_wait`, which is deliberately cancellable. If the calling task
+  is cancelled during that wait, `wait_for` raises at once and leaves the
+  inner task running. Here the inner task is `Condition.wait`, whose cleanup
+  re-acquires the lock; when the lock is busy, the caller's `async with`
+  exits and releases a lock it does not hold. The next queued task enters
+  the critical section while the real holder is still in it, and the
+  orphaned inner task later acquires the lock with nobody left to release
+  it (the deadlock in the original workload).
+- **Feasibility:** reproduces on the standard asyncio event loop with fixed
+  sleeps (see `plain()` in the script: the intruder enters while the holder
+  is inside). Nothing beyond a timeout that fires while the lock is busy and
+  a cancellation (for example shutdown) before the lock frees up.
+- **Upstream status:** fixed in 3.12 as a side effect of
+  python/cpython GH-96764 (PR #98518), which rewrote `wait_for` on top of
+  `asyncio.timeout` so the awaitable runs in the calling task. `locks.py` is
+  identical in 3.11.18 and 3.12.0, so the change in behaviour comes from
+  `wait_for`. No report of this exact symptom was looked for or filed; 3.11
+  only receives security fixes. Listed as a rediscovery of fixed behaviour.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

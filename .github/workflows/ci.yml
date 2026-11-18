@@ -59,3 +59,16 @@ jobs:
             python "$script"
             echo "::endgroup::"
           done
+
+  findings-cpython311:
+    # This finding is specific to Python 3.11: it must reproduce there.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e .
+      - env:
+          PYTHONHASHSEED: "0"
+        run: python findings/cpython311_wait_for_lock.py

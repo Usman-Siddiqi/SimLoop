@@ -505,9 +505,10 @@ against the pinned versions.
 | --- | --- | --- | --- |
 | [aiojobs](https://pypi.org/project/aiojobs/) | 1.4.0 | Closing a job that is still queued makes `Scheduler(limit=N)` run N+1 jobs at once ([script](findings/aiojobs_pending_close.py)) | No matching upstream issue found; not reported |
 | [async-lru](https://pypi.org/project/async-lru/) | 2.4.0 | After `cache_invalidate`, the stale call's cleanup evicts the replacement entry, so the next call starts a duplicate execution ([script](findings/async_lru_replaced_entry.py)) | Already known upstream (open PRs #797, #807); rediscovered from a generic property |
+| CPython asyncio | 3.11.x | Cancelling a task while `wait_for` is cancelling its inner task after a timeout returns early; `async with cond` then releases another task's lock and a second task enters the critical section ([script](findings/cpython311_wait_for_lock.py)) | Fixed in 3.12 by the `wait_for` rewrite (GH-96764); rediscovered |
 
-Both were found by writing down a property the library promises (at most N
-jobs at once; one execution per key) and letting SimLoop search schedules,
+All three were found by writing down a property the library promises (at most N
+jobs at once; one execution per key; one task inside a lock) and letting SimLoop search schedules,
 timings and cancellations for a counterexample.
 
 ## Project docs
