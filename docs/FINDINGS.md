@@ -13,7 +13,58 @@ here. Rules (see `CLAUDE.md`):
 
 ## Confirmed bugs
 
-None yet.
+### 1. aiojobs 1.4.0: closing a pending job lets the scheduler exceed `limit`
+
+- **Library:** [aiojobs](https://pypi.org/project/aiojobs/) 1.4.0 (latest
+  release on 2026-11-18; the code is unchanged on the upstream default branch).
+- **Reproduction:** [`findings/aiojobs_pending_close.py`](../findings/aiojobs_pending_close.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** fails on 202 of seeds 0-999 with the default settings
+  (`scheduler="random"`; first failing seed 1) and on 174 of 1000 with
+  `scheduler="fifo", timer_jitter=0.001` (first failing seed 0).
+- **Property violated:** a `Scheduler(limit=N)` never runs more than N jobs
+  at once.
+- **Explanation:** `Scheduler.active_count` is computed as
+  `len(self._jobs) - self._pending.qsize()`. `Job.close()` on a job that is
+  still queued starts and immediately cancels its task; the task's done
+  callback calls `Scheduler._done(job)`, which removes the job from `_jobs`
+  while the job is still in the pending queue. `active_count` is now one too
+  low, and `_done` uses it to decide how many queued jobs to start, so one
+  extra job starts while the limit is already reached. In the minimal
+  reproduction (limit 1: one running job, two queued, close the first queued
+  job) two jobs run at the same time.
+- **Feasibility:** reproduces on the standard asyncio event loop with no
+  special timing (`asyncio.run`, see the script), and under SimLoop with FIFO
+  scheduling.
+- **Upstream status:** no matching issue or pull request found in a search of
+  aio-libs/aiojobs on 2026-11-18. Not reported.
+
+### 2. async-lru 2.4.0: a stale call evicts the entry that replaced it
+
+- **Library:** [async-lru](https://pypi.org/project/async-lru/) 2.4.0 (latest
+  release on 2026-11-18).
+- **Reproduction:** [`findings/async_lru_replaced_entry.py`](../findings/async_lru_replaced_entry.py).
+- **Seeds:** fails on 15 of seeds 0-999 with the default settings (first
+  failing seed 135) and on 16 of 1000 with `scheduler="fifo",
+  timer_jitter=0.001` (first failing seed 73). The shrunk run of seed 135 is
+  40 steps long: a call times out after its key was invalidated and refilled,
+  and the next call for that key starts a second execution.
+- **Property violated:** concurrent calls for the same key share one
+  execution (after the most recent invalidation).
+- **Explanation:** after `cache_invalidate(key)` the original call keeps
+  running. If another call fills the key first, the original call's cleanup
+  pops `self.__cache[key]` without checking that the entry is still its own:
+  in `_shield_and_handle_cancelled_error` when its last waiter is cancelled,
+  and in `_task_done_callback` when it fails. The replacement entry is
+  evicted, and the next call for the key starts a duplicate execution
+  instead of joining the one in flight. A successful stale call also starts
+  the replacement's TTL timer early.
+- **Feasibility:** reproduces on the standard asyncio event loop (see the
+  script: 3 executions where 2 are expected).
+- **Upstream status:** already known. Open pull requests
+  aio-libs/async-lru#797 and #807 describe and fix the same problem; neither
+  is in a release yet. Listed here as a rediscovery from a generic property,
+  not as a new report.
 
 ## Suspected issues
 
@@ -22,3 +73,19 @@ None yet.
 ## False positives
 
 None yet.
+
+## Tested, nothing found
+
+Harnesses that ran clean. Absence of a failure here is evidence about these
+properties and fault mixes only.
+
+- **redis-py 8.1.0 (`redis.asyncio`)**, [`findings/redis_reply_integrity.py`](../findings/redis_reply_integrity.py),
+  against a simulated RESP2 server:
+  every `ECHO` and pipelined reply matched its own request across 500 seeds
+  with random client timeouts (`asyncio.wait_for`), 1% injected TCP resets
+  per segment and server process crashes every 0.3-1.5 s; the client
+  recovered after faults stopped and the pool had no connections stuck in
+  use. (The 2023 cancellation bug, CVE-2023-28858/28859, is fixed.)
+- **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
+  writer), no deadlock and no lock left held, across 3000 seeds with random
+  acquire timeouts, in both `fast` modes.

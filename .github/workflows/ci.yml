@@ -17,8 +17,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -e '.[dev]'
-      - run: ruff check src tests examples scripts
-      - run: ruff format --check src tests examples scripts
+      - run: ruff check src tests examples scripts findings
+      - run: ruff format --check src tests examples scripts findings
       - run: mypy
 
   test:
@@ -40,3 +40,22 @@ jobs:
         run: |
           ! simloop explore examples/inventory.py:main --seeds 200 --trace-last 0
           simloop explore examples/inventory.py:main_fixed --seeds 200
+
+  findings:
+    # The recorded findings must keep reproducing against the pinned versions.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e . -r findings/requirements.txt
+      - name: Run every findings script
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          for script in findings/[!_]*.py; do
+            echo "::group::$script"
+            python "$script"
+            echo "::endgroup::"
+          done

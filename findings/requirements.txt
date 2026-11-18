@@ -1,0 +1,5 @@
+# Versions the findings were recorded against.
+aiojobs==1.4.0
+async-lru==2.4.0
+redis==8.1.0
+aiorwlock==1.6.0
