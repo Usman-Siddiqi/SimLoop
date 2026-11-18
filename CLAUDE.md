@@ -41,7 +41,12 @@ At the end of every session:
   `pyproject.toml`), `pytest`. All four must pass before pushing; CI runs them
   on 3.11 to 3.13.
 - Commits: small, logical, Conventional Commits (`feat:`, `fix:`, `test:`,
-  `docs:`, `refactor:`, `ci:`, `chore:`). Push regularly to the working branch.
+  `docs:`, `refactor:`, `ci:`, `chore:`). Work directly on `main` (Usman's
+  call: this is the only agent on the project) and push regularly.
+- Work autonomously through the roadmap; report back to Usman when a
+  milestone batch is meaningfully done or when truly blocked.
+- Borrowing ideas from other tools is fine. Reusing actual code only from
+  MIT-compatible sources, with the attribution their license requires.
 - Comments explain *why*, not *what*. No tutorial-style comments.
 - Every feature lands with tests. Anything touching scheduling, time or
   randomness also needs a determinism test (same seed, same trace digest).
