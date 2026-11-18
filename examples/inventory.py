@@ -43,9 +43,11 @@ class Shop:
 
     async def reserve(self, quantity: int) -> bool:
         stock = await self.db.read_stock()
+        simloop.log(f"read stock={stock}")
         if stock < quantity:
             return False
         await self.db.write_stock(stock - quantity)
+        simloop.log(f"wrote stock={stock - quantity}")
         self.sold += quantity
         return True
 
@@ -56,7 +58,7 @@ class Shop:
 
 async def customer(shop: Shop, quantity: int, *, locked: bool) -> bool:
     await asyncio.sleep(simloop.rng().uniform(0.0, 1.0))
-    simloop.log(f"wants {quantity}")
+    simloop.log(f"order {quantity}")
     ok = await (shop.reserve_locked(quantity) if locked else shop.reserve(quantity))
     simloop.log("reserved" if ok else "out of stock")
     return ok
