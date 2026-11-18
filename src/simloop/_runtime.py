@@ -1,0 +1,387 @@
+"""Running a coroutine function inside a simulation and classifying the outcome."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import dataclasses
+import gc
+import os
+import random
+import threading
+import time
+import traceback
+from collections.abc import Callable, Coroutine, Iterator, Sequence
+from dataclasses import dataclass, field
+from types import TracebackType
+from typing import Any, Generic, TypeVar
+
+from ._choices import ChoiceRandom, ChoiceSource
+from ._loop import _INTERNAL_DIRS, SimEventLoop
+from ._properties import Predicate, Property, PropertyChecker
+from ._sandbox import Sandbox
+from ._trace import Trace
+from .errors import (
+    DeadlockError,
+    InvariantViolation,
+    NondeterminismError,
+    SimulationError,
+    StepLimitExceeded,
+    TimeLimitExceeded,
+)
+from .scheduling import Scheduler, resolve_scheduler
+
+T = TypeVar("T")
+
+MainFunction = Callable[[], Coroutine[Any, Any, T]]
+
+_wall_clock = time.perf_counter
+_local = threading.local()
+
+# 2024-01-01T00:00:00Z: what time.time() reports at simulated t=0.
+DEFAULT_EPOCH = 1_704_067_200.0
+
+
+@dataclass(frozen=True)
+class SimConfig:
+    """Settings for a simulation run. Every field is part of a reproduction."""
+
+    scheduler: str | Scheduler = "random"
+    """``"random"`` explores orderings of ready callbacks, ``"fifo"`` is asyncio's order."""
+    timer_jitter: float = 0.0
+    """Upper bound (seconds) of a random, non-negative delay added to every timer."""
+    max_steps: int | None = 1_000_000
+    max_time: float | None = None
+    """Fail if simulated time would pass this many seconds."""
+    start_time: float = 0.0
+    epoch: float = DEFAULT_EPOCH
+    sandbox: bool = True
+    """Virtualize time/randomness and reject real I/O while the run is active."""
+    fail_on_unhandled: bool = True
+    """Fail when a background task or callback raises and nobody handles it."""
+    gc_interval: int | None = 10_000
+    """Disable automatic GC during the run and collect every N steps instead,
+    so finalizers run at reproducible points. ``None`` leaves GC alone."""
+    keep_trace: bool = True
+
+    def replace(self, **changes: Any) -> SimConfig:
+        return dataclasses.replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class Failure:
+    """Why a run failed."""
+
+    kind: str
+    """One of: exception, invariant, deadlock, step_limit, time_limit,
+    unhandled, nondeterminism."""
+    message: str
+    signature: str
+    """Stable identity used to group failures across seeds."""
+    exception: BaseException | None = field(default=None, compare=False, repr=False)
+
+    def format(self) -> str:
+        if self.exception is None or self.kind in {"deadlock", "invariant"}:
+            return f"{self.kind}: {self.message}"
+        return "".join(traceback.format_exception(self.exception)).rstrip()
+
+
+@dataclass
+class RunResult(Generic[T]):
+    """Outcome of one simulated run."""
+
+    seed: int
+    config: SimConfig
+    value: T | None
+    failure: Failure | None
+    steps: int
+    sim_time: float
+    wall_time: float
+    trace: Trace
+    choices: list[int]
+
+    @property
+    def ok(self) -> bool:
+        return self.failure is None
+
+    @property
+    def digest(self) -> str:
+        return self.trace.digest()
+
+    def raise_for_failure(self) -> None:
+        if self.failure is None:
+            return
+        if self.failure.exception is not None:
+            raise self.failure.exception
+        raise SimulationError(self.failure.message)
+
+
+class Simulation:
+    """State of one in-progress run; reachable from inside it via :func:`current`."""
+
+    def __init__(self, seed: int, config: SimConfig, replay: Sequence[int] | None = None) -> None:
+        self.seed = seed
+        self.config = config
+        self.choices = ChoiceSource(seed, replay)
+        self.trace = Trace(keep=config.keep_trace)
+        self.loop = SimEventLoop(
+            choices=self.choices,
+            scheduler=resolve_scheduler(config.scheduler),
+            trace=self.trace,
+            start_time=config.start_time,
+            timer_jitter=config.timer_jitter,
+            max_steps=config.max_steps,
+            max_time=config.max_time,
+        )
+        self.properties = PropertyChecker(self.loop.time)
+        self.loop.step_hooks.append(self.properties.after_step)
+        self.loop.advance_hooks.append(self.properties.before_advance)
+        if config.gc_interval:
+            self.loop.step_hooks.append(self._make_gc_hook(config.gc_interval))
+        self.random: random.Random = ChoiceRandom(self.choices)
+        self.sandbox: Sandbox | None = None
+
+    def _make_gc_hook(self, interval: int) -> Callable[[], None]:
+        loop = self.loop
+
+        def collect() -> None:
+            if loop.steps % interval == 0:
+                gc.collect()
+
+        return collect
+
+    def execute(self, main: MainFunction[T]) -> RunResult[T]:
+        if not callable(main):
+            raise TypeError(
+                "simloop needs a coroutine *function* so every run gets a fresh coroutine; "
+                "pass `main`, not `main()`"
+            )
+        started = _wall_clock()
+        value: T | None = None
+        failure: Failure | None = None
+        loop = self.loop
+        with self._activated() as sandbox:
+            main_task = loop.create_task(main(), name="main")
+            try:
+                value = loop.run_until_complete(main_task)
+            except (KeyboardInterrupt, SystemExit):
+                self._cleanup(abandon=True)
+                raise
+            except BaseException as exc:
+                failure = self._fail(_classify(exc))
+            if failure is None:
+                failure = self._cleanup(abandon=False)
+                if failure is not None:
+                    self._fail(failure)
+            else:
+                self._cleanup(abandon=True)
+            if failure is None:
+                try:
+                    self.properties.at_end()
+                except InvariantViolation as exc:
+                    failure = self._fail(_classify(exc))
+            unhandled = self._collect_unhandled(main_task)
+            if failure is None and unhandled and self.config.fail_on_unhandled:
+                failure = self._fail(unhandled[0])
+            if sandbox is not None and sandbox.leaks:
+                failure = Failure(
+                    "nondeterminism",
+                    sandbox.leaks[0],
+                    f"nondeterminism:{sandbox.leaks[0].split(' ', 1)[0]}",
+                    NondeterminismError(sandbox.leaks[0]),
+                )
+        return RunResult(
+            seed=self.seed,
+            config=self.config,
+            value=value,
+            failure=failure,
+            steps=loop.steps,
+            sim_time=loop.time() - self.config.start_time,
+            wall_time=_wall_clock() - started,
+            trace=self.trace,
+            choices=list(self.choices.record),
+        )
+
+    def _fail(self, failure: Failure) -> Failure:
+        self.loop._record("failed", "sim", failure.message.splitlines()[0])
+        self.trace.freeze()
+        return failure
+
+    @contextlib.contextmanager
+    def _activated(self) -> Iterator[Sandbox | None]:
+        if getattr(_local, "simulation", None) is not None:
+            raise RuntimeError("simulations cannot be nested")
+        gc_was_enabled = gc.isenabled()
+        if self.config.gc_interval:
+            # Garbage left by earlier runs sits in the young generations because
+            # automatic collection was off; clear it so its finalizers cannot
+            # fire at an arbitrary point inside this run.
+            gc.collect(1)
+            gc.disable()
+        sandbox = Sandbox(self.loop, self.seed, self.config.epoch) if self.config.sandbox else None
+        _local.simulation = self
+        try:
+            with sandbox if sandbox is not None else contextlib.nullcontext():
+                self.sandbox = sandbox
+                yield sandbox
+        finally:
+            _local.simulation = None
+            self.loop.close()
+            if gc_was_enabled:
+                gc.enable()
+
+    def _cleanup(self, *, abandon: bool) -> Failure | None:
+        """Cancel leftover tasks and finalize async generators, like ``asyncio.run``.
+
+        After a failure the run is already decided, so cleanup problems are ignored.
+        """
+        loop = self.loop
+        loop.step_hooks.remove(self.properties.after_step)
+        loop.advance_hooks.remove(self.properties.before_advance)
+        if abandon and loop.max_steps is not None:
+            loop.max_steps = loop.steps + 10_000
+        try:
+            pending = [task for task in loop.tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            if loop.has_asyncgens:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if not abandon:
+                return _classify(exc)
+        finally:
+            for task in loop.tasks:
+                if not task.done():
+                    task._log_destroy_pending = False  # type: ignore[attr-defined]
+        return None
+
+    def _collect_unhandled(self, main_task: asyncio.Task[Any]) -> list[Failure]:
+        failures: list[Failure] = []
+        for task in self.loop.tasks:
+            if task is main_task or not task.done() or task.cancelled():
+                continue
+            exc = task._exception
+            if exc is not None and task._log_traceback:
+                task._log_traceback = False
+                failures.append(
+                    Failure(
+                        "unhandled",
+                        f"exception in task {task.get_name()!r} was never retrieved: "
+                        f"{type(exc).__name__}: {exc}",
+                        f"unhandled:{type(exc).__name__}@{_location(exc)}",
+                        exc,
+                    )
+                )
+        for context in self.loop.errors:
+            exc = context.get("exception")
+            message = str(context.get("message", "unhandled error in callback"))
+            failures.append(
+                Failure(
+                    "unhandled",
+                    message if exc is None else f"{message}: {type(exc).__name__}: {exc}",
+                    "unhandled:"
+                    + (message if exc is None else f"{type(exc).__name__}@{_location(exc)}"),
+                    exc if isinstance(exc, BaseException) else None,
+                )
+            )
+        return failures
+
+
+def run(
+    main: MainFunction[T],
+    *,
+    seed: int = 0,
+    config: SimConfig | None = None,
+    replay: Sequence[int] | None = None,
+) -> RunResult[T]:
+    """Run ``main()`` in a fresh simulation and return the outcome.
+
+    ``replay`` replays a recorded choice sequence (``RunResult.choices``)
+    instead of drawing choices from the seed.
+    """
+    return Simulation(seed, config or SimConfig(), replay).execute(main)
+
+
+# -- API for code running inside a simulation ------------------------------------
+
+
+def current() -> Simulation:
+    """The simulation running on this thread. Raises if there is none."""
+    sim: Simulation | None = getattr(_local, "simulation", None)
+    if sim is None:
+        raise RuntimeError("not inside a simloop simulation")
+    return sim
+
+
+def in_simulation() -> bool:
+    return getattr(_local, "simulation", None) is not None
+
+
+def now() -> float:
+    """Current simulated time in seconds."""
+    return current().loop.time()
+
+
+def rng() -> random.Random:
+    """The simulation's random generator: seeded, recorded and shrinkable."""
+    return current().random
+
+
+def log(message: str) -> None:
+    """Add a message to the run's trace, attributed to the current task."""
+    current().loop.log(message)
+
+
+def always(predicate: Predicate, name: str | None = None) -> Property:
+    """Require ``predicate()`` to be true now and after every subsequent step."""
+    return current().properties.add_always(name or _predicate_name(predicate), predicate)
+
+
+def eventually(
+    predicate: Predicate, name: str | None = None, *, within: float | None = None
+) -> Property:
+    """Require ``predicate()`` to become true, within ``within`` simulated seconds
+    if given, otherwise before the run ends."""
+    return current().properties.add_eventually(
+        name or _predicate_name(predicate), predicate, within
+    )
+
+
+# -- failure classification --------------------------------------------------------
+
+
+def _classify(exc: BaseException) -> Failure:
+    if isinstance(exc, InvariantViolation):
+        return Failure("invariant", str(exc), f"invariant:{exc.property_name}", exc)
+    if isinstance(exc, DeadlockError):
+        points = sorted({entry.split(" waiting at ", 1)[-1] for entry in exc.blocked})
+        return Failure("deadlock", str(exc), "deadlock:" + ";".join(points), exc)
+    if isinstance(exc, StepLimitExceeded):
+        return Failure("step_limit", str(exc), "step_limit", exc)
+    if isinstance(exc, TimeLimitExceeded):
+        return Failure("time_limit", str(exc), "time_limit", exc)
+    if isinstance(exc, NondeterminismError):
+        return Failure("nondeterminism", str(exc), "nondeterminism", exc)
+    message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return Failure("exception", message, f"exception:{type(exc).__name__}@{_location(exc)}", exc)
+
+
+def _location(exc: BaseException) -> str:
+    """``file:line`` of the deepest non-framework frame where ``exc`` was raised."""
+    tb: TracebackType | None = exc.__traceback__
+    location = "?"
+    while tb is not None:
+        filename = tb.tb_frame.f_code.co_filename
+        if not filename.startswith(_INTERNAL_DIRS):
+            location = f"{os.path.basename(filename)}:{tb.tb_lineno}"
+        tb = tb.tb_next
+    return location
+
+
+def _predicate_name(predicate: Predicate) -> str:
+    name = getattr(predicate, "__qualname__", None)
+    return name if isinstance(name, str) else repr(predicate)
