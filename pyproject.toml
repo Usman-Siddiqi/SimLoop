@@ -26,6 +26,8 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+# Only for regenerating the README GIF (scripts/render_gif.py).
+visuals = ["pillow>=10"]
 
 [project.scripts]
 simloop = "simloop.cli:main"

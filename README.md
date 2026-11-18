@@ -166,6 +166,17 @@ shrunk in 2 runs (0.00s): 70 -> 0 choices, 197 -> 101 steps, t=2.627188s -> t=1.
     1.222000     101  sim      failed   AssertionError: 5 increments acknowledged, server says 1
 ```
 
+The same shrunk run, played back from its trace (`scripts/render_gif.py`;
+the host lanes carry network events and faults, task bars show lifetimes,
+grey lines are TCP segments from send to arrival):
+
+![The shrunk counter run: five acknowledged increments, a crash (red span on the counter host), a refused connect, a restart, and the read that returns 1](docs/assets/counter-run.gif)
+
+`simloop run examples/counter.py:main --seed 3 --html run.html` writes the
+interactive version of this view: zoom, filter by event kind, hover for
+details, click to jump to the event list. `explore --html DIR` writes one per
+failure group, and `pytest --simloop-html DIR` one per failing test.
+
 `main_durable`, which writes the count to the host's simulated disk before
 replying, passes all 200 seeds.
 
