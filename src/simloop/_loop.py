@@ -126,6 +126,10 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         # Steps run in a row without the clock moving, to explain a step limit.
         self._still_steps = 0
         self._still_since = start_time
+        self.longest_still = 0
+        """Most steps run in a row without the clock moving."""
+        self.max_still_steps: int | None = None
+        """Fail once this many steps run in a row at one instant (used by shrinking)."""
         self._ready: deque[_Ready] = deque()
         self._batch_left = 0
         # (fire time, tie-breaker, handle, origin or None for a fresh one)
@@ -323,6 +327,13 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._step += 1
         if self._now == self._still_since:
             self._still_steps += 1
+            if self._still_steps > self.longest_still:
+                self.longest_still = self._still_steps
+                if self.max_still_steps is not None and self._still_steps > self.max_still_steps:
+                    raise StepLimitExceeded(
+                        f"ran {self._still_steps} steps in a row at t={self._now!r}, "
+                        f"over the limit of {self.max_still_steps}"
+                    )
         else:
             self._still_since, self._still_steps = self._now, 1
         if self.max_steps is not None and self._step > self.max_steps:
@@ -330,8 +341,9 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         task = _owning_task(handle)
         if task is not None:
             self._register(task)
-            self._record("run", task.get_name(), f"resume {_suspension_point(task)}")
-        else:
+            if self.trace.recording:
+                self._record("run", task.get_name(), f"resume {_suspension_point(task)}")
+        elif self.trace.recording:
             kind = "timer" if isinstance(handle, asyncio.TimerHandle) else "run"
             self._record(kind, "loop", _callable_name(handle._callback))  # type: ignore[attr-defined]
 

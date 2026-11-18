@@ -27,19 +27,22 @@ class TraceEvent:
 class Trace:
     """Ordered record of simulation events plus a digest over all of them."""
 
-    def __init__(self, *, keep: bool = True) -> None:
+    def __init__(self, *, keep: bool = True, digest: bool = True) -> None:
         self.keep = keep
         self._events: list[TraceEvent] = []
         self._hash = hashlib.blake2b(digest_size=16)
         self._count = 0
         self._frozen = False
+        self.recording = keep or digest
+        """Whether events are used at all; callers can skip building them when not."""
 
     def freeze(self) -> None:
         """Ignore further events: after a failure, only cleanup remains."""
         self._frozen = True
+        self.recording = False
 
     def record(self, step: int, time: float, kind: str, actor: str, detail: str = "") -> None:
-        if self._frozen:
+        if not self.recording:
             return
         event = TraceEvent(step, time, kind, actor, detail)
         self._hash.update(event.line().encode())

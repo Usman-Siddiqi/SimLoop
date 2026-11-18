@@ -12,6 +12,7 @@ import pytest
 
 import simloop
 from simloop import cli
+from simloop._runtime import run_measured
 from simloop._shrink import normalize
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -185,3 +186,31 @@ def test_candidates_that_spin_do_not_eat_the_budget() -> None:
     assert time.perf_counter() - started < 15
     assert result.shrunk.failure is not None
     assert result.shrunk.failure.signature == failing.failure.signature
+
+
+def test_still_limit_cuts_off_a_spin_at_one_instant() -> None:
+    async def main() -> None:
+        await asyncio.sleep(1.0)
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+    config = simloop.SimConfig()
+    result, longest = run_measured(main, seed=0, config=config)
+    assert result.ok
+    assert 50 <= longest < 60
+    cut, _ = run_measured(main, seed=0, config=config, max_still_steps=20)
+    assert cut.failure is not None
+    assert cut.failure.kind == "step_limit"
+    assert "20" in cut.failure.message
+    assert "t=1.0" in cut.failure.message
+
+
+def test_candidates_skip_the_trace_digest() -> None:
+    async def main() -> None:
+        await asyncio.sleep(0.1)
+
+    quiet, _ = run_measured(main, seed=0, config=simloop.SimConfig(keep_trace=False))
+    traced = simloop.run(main, seed=0, config=simloop.SimConfig(keep_trace=False))
+    assert quiet.ok
+    assert quiet.digest != traced.digest
+    assert traced.digest == simloop.run(main, seed=0).digest

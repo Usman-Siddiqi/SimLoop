@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ._runtime import MainFunction, RunResult, SimConfig, run
+from ._runtime import MainFunction, RunResult, SimConfig, run, run_measured
 
 _wall_clock = time.perf_counter
 
@@ -65,6 +65,9 @@ def _key(choices: list[int]) -> tuple[int, list[int]]:
 CANDIDATE_MIN_STEPS = 10_000
 """Smallest step budget a shrink candidate gets (see ``_Shrinker``)."""
 
+CANDIDATE_MIN_STILL = 200
+"""Smallest run of steps at one instant a shrink candidate may make."""
+
 
 class _Shrinker:
     def __init__(
@@ -81,6 +84,7 @@ class _Shrinker:
         self.seed = failing.seed
         self.signature = failing.failure.signature
         self.config = config.replace(keep_trace=False)
+        self.max_still: int | None = None
         if failing.failure.kind != "step_limit":
             # A candidate that runs far longer than the failure it should
             # simplify cannot be the simpler run we want, and a zeroed choice
@@ -89,6 +93,14 @@ class _Shrinker:
             cap = max(10 * failing.steps, CANDIDATE_MIN_STEPS)
             if config.max_steps is None or cap < config.max_steps:
                 self.config = self.config.replace(max_steps=cap)
+            # Most of those spins happen at a single instant, so cut a candidate
+            # off once it stays at one instant far longer than the failing run
+            # did. Zeroed durations legitimately pile a run's steps onto one
+            # instant, hence the allowance for the whole run's length.
+            _, still = run_measured(
+                main, seed=failing.seed, config=self.config, replay=failing.choices
+            )
+            self.max_still = max(10 * still, 2 * failing.steps, CANDIDATE_MIN_STILL)
         self.best = normalize(failing.choices)
         self.max_runs = max_runs
         self.deadline = deadline
@@ -104,7 +116,13 @@ class _Shrinker:
         if self.exhausted() or _key(candidate) >= _key(self.best):
             return False
         self.runs += 1
-        result = run(self.main, seed=self.seed, config=self.config, replay=candidate)
+        result, _ = run_measured(
+            self.main,
+            seed=self.seed,
+            config=self.config,
+            replay=candidate,
+            max_still_steps=self.max_still,
+        )
         if result.failure is None or result.failure.signature != self.signature:
             return False
         recorded = normalize(result.choices)

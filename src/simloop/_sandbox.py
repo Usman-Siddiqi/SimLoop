@@ -214,7 +214,7 @@ class Sandbox:
         # real environment would send simulated traffic to an address that does
         # not exist (and make runs machine-dependent).
         self._saved_env = {
-            key: value for key, value in os.environ.items() if key.lower().endswith("_proxy")
+            key: os.environ[key] for key in list(os.environ) if key.lower().endswith("_proxy")
         }
         for key in self._saved_env:
             del os.environ[key]

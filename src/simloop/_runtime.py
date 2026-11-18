@@ -157,11 +157,18 @@ class RunResult(Generic[T]):
 class Simulation:
     """State of one in-progress run; reachable from inside it via :func:`current`."""
 
-    def __init__(self, seed: int, config: SimConfig, replay: Sequence[int] | None = None) -> None:
+    def __init__(
+        self,
+        seed: int,
+        config: SimConfig,
+        replay: Sequence[int] | None = None,
+        *,
+        digest: bool = True,
+    ) -> None:
         self.seed = seed
         self.config = config
         self.choices = ChoiceSource(seed, replay)
-        self.trace = Trace(keep=config.keep_trace)
+        self.trace = Trace(keep=config.keep_trace, digest=digest)
         self.loop = SimEventLoop(
             choices=self.choices,
             scheduler=resolve_scheduler(config.scheduler),
@@ -288,8 +295,12 @@ class Simulation:
         loop = self.loop
         loop.step_hooks.remove(self.properties.after_step)
         loop.advance_hooks.remove(self.properties.before_advance)
+        if not abandon:
+            loop.max_still_steps = None
         if abandon and loop.max_steps is not None:
-            loop.max_steps = loop.steps + 10_000
+            # Cleanup gets no more steps than the run itself had, so a run cut
+            # short at a small limit (a shrink candidate) stays cheap.
+            loop.max_steps = loop.steps + min(10_000, loop.max_steps)
         try:
             pending = [task for task in loop.tasks if not task.done()]
             for task in pending:
@@ -355,6 +366,25 @@ def run(
     instead of drawing choices from the seed.
     """
     return Simulation(seed, config or SimConfig(), replay).execute(main)
+
+
+def run_measured(
+    main: MainFunction[T],
+    *,
+    seed: int,
+    config: SimConfig,
+    replay: Sequence[int] | None = None,
+    max_still_steps: int | None = None,
+) -> tuple[RunResult[T], int]:
+    """``run``, also returning the most steps run in a row at one instant.
+
+    ``max_still_steps`` fails the run with a step limit once a streak gets
+    longer than that. With ``keep_trace`` off the run computes no trace
+    digest either, so the result's ``digest`` is meaningless.
+    """
+    sim = Simulation(seed, config, replay, digest=config.keep_trace)
+    sim.loop.max_still_steps = max_still_steps
+    return sim.execute(main), sim.loop.longest_still
 
 
 # -- API for code running inside a simulation ------------------------------------
