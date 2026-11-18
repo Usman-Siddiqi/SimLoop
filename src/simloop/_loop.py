@@ -26,7 +26,13 @@ from typing import TYPE_CHECKING, Any, TypeVar, TypeVarTuple, Unpack, cast
 from . import _transport
 from ._choices import ChoiceSource
 from ._trace import Trace
-from .errors import DeadlockError, StepLimitExceeded, TimeLimitExceeded, UnsupportedOperation
+from .errors import (
+    CancellationLeak,
+    DeadlockError,
+    StepLimitExceeded,
+    TimeLimitExceeded,
+    UnsupportedOperation,
+)
 from .scheduling import Scheduler
 
 if TYPE_CHECKING:
@@ -112,6 +118,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         max_steps: int | None = None,
         max_time: float | None = None,
         step_time: float = 0.0,
+        strict_cancellation: bool = False,
     ) -> None:
         self.choices = choices
         self.scheduler = scheduler
@@ -120,6 +127,9 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self.max_steps = max_steps
         self.max_time = None if max_time is None else start_time + max_time
         self.step_time = step_time
+        self.strict_cancellation = strict_cancellation
+        # Tasks that ended a step still running with a cancellation pending.
+        self._kept_running_cancelled: dict[asyncio.Task[Any], str] = {}
 
         self._now = start_time
         self._step = 0
@@ -353,8 +363,18 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         finally:
             self._current_origin = None
 
-        if task is not None and task.done():
-            self._task_finished(task)
+        if task is not None:
+            if task.done():
+                self._task_finished(task)
+            elif (
+                self.strict_cancellation
+                and task.cancelling()
+                and task not in self._kept_running_cancelled
+            ):
+                self._kept_running_cancelled[task] = (
+                    f"first seen at t={self._now!r} (step {self._step}), "
+                    f"suspended at {_suspension_point(task)}"
+                )
         for hook in self.step_hooks:
             hook()
         if self.step_time:
@@ -438,6 +458,15 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         else:
             outcome = "returned"
         self._record("done", task.get_name(), outcome)
+        if self.strict_cancellation:
+            kept_running = self._kept_running_cancelled.pop(task, None)
+            # A task that takes a cancellation and finishes in that same step
+            # (a catch-all at the top of a request handler) leaves nothing
+            # behind that could misread the count, so only a task that kept
+            # running with a cancellation pending counts as a leak.
+            if kept_running and outcome != "cancelled" and task.cancelling():
+                self._tasks[task] = True
+                raise _cancellation_leak(task, outcome, kept_running)
         if outcome == "returned" or outcome == "cancelled":
             # Nothing left to inspect; drop it so long runs don't hoard tasks.
             del self._tasks[task]
@@ -785,6 +814,21 @@ def _coro_name(coro: Any) -> str:
 def _describe_exception(exc: BaseException) -> str:
     text = str(exc)
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _cancellation_leak(task: asyncio.Task[Any], outcome: str, where: str) -> CancellationLeak:
+    pending = task.cancelling()
+    coro: Any = task.get_coro()
+    qualname = getattr(coro, "__qualname__", None) or type(coro).__name__
+    return CancellationLeak(
+        f"task {task.get_name()!r} ({qualname}) {outcome} with {pending} cancellation "
+        f"request{'s' if pending != 1 else ''} still pending: something called cancel() "
+        "on it without a matching uncancel(), or swallowed the CancelledError, so a "
+        "later asyncio.timeout() or TaskGroup in this task would mistake it for a "
+        f"cancellation from outside (the pending request was {where})",
+        task.get_name(),
+        qualname,
+    )
 
 
 def _suspension_point(task: asyncio.Task[Any]) -> str:

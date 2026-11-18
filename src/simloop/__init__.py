@@ -29,6 +29,7 @@ from ._stablehash import stable_hash
 from ._testing import SimulationFailed, test
 from ._trace import Trace, TraceEvent
 from .errors import (
+    CancellationLeak,
     DeadlockError,
     InvariantViolation,
     NondeterminismError,
@@ -43,6 +44,7 @@ from .scheduling import FifoScheduler, PCTScheduler, RandomScheduler, Scheduler
 __version__ = "0.1.0.dev0"
 
 __all__ = [
+    "CancellationLeak",
     "ChoiceSource",
     "DeadlockError",
     "Divergence",

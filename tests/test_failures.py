@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import pytest
 
@@ -278,3 +280,61 @@ def test_tasks_cleanup_cannot_finish_are_closed_inside_the_run() -> None:
     assert result.failure is not None
     assert result.failure.kind == "exception"
     assert seen == [1.0]
+
+
+def _leaky_scope_then_more_work() -> Callable[[], Coroutine[Any, Any, None]]:
+    async def main() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        asyncio.get_running_loop().call_later(0.1, task.cancel)
+        with contextlib.suppress(asyncio.CancelledError):  # swallowed without uncancel()
+            await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0)
+
+    return main
+
+
+def test_strict_cancellation_flags_a_cancel_request_left_pending() -> None:
+    main = _leaky_scope_then_more_work()
+    assert simloop.run(main).ok
+    result = simloop.run(main, config=simloop.SimConfig(strict_cancellation=True))
+    assert result.failure is not None
+    assert result.failure.kind == "cancel_leak"
+    assert result.failure.signature == "cancel_leak:_leaky_scope_then_more_work.<locals>.main"
+    assert "1 cancellation request still pending" in result.failure.message
+    assert "t=0.1" in result.failure.message
+
+
+def test_strict_cancellation_accepts_well_behaved_code() -> None:
+    async def handler() -> None:
+        # A catch-all that ends the task right away leaks nothing.
+        with contextlib.suppress(BaseException):
+            await asyncio.sleep(10)
+
+    async def failing_child() -> None:
+        raise ValueError("child")
+
+    async def main() -> None:
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await asyncio.sleep(1)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.sleep(1), 0.1)
+        with contextlib.suppress(ExceptionGroup):
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(failing_child())
+                await asyncio.sleep(1)
+        task = asyncio.get_running_loop().create_task(handler())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await task
+        cleanup = asyncio.get_running_loop().create_task(asyncio.sleep(10))
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup
+
+    config = simloop.SimConfig(strict_cancellation=True)
+    for seed in range(20):
+        result = simloop.run(main, seed=seed, config=config)
+        assert result.ok, result.failure

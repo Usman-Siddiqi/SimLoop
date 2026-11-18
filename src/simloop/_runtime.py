@@ -23,6 +23,7 @@ from ._properties import Predicate, Property, PropertyChecker
 from ._sandbox import Sandbox
 from ._trace import Trace
 from .errors import (
+    CancellationLeak,
     DeadlockError,
     InvariantViolation,
     NondeterminismError,
@@ -76,6 +77,12 @@ class SimConfig:
     """How long a TCP connect keeps retrying an unreachable host."""
     buggify: bool = True
     """Let :func:`simloop.faults.buggify` sites fire."""
+    strict_cancellation: bool = False
+    """Fail when a task finishes without being cancelled while ``cancelling()``
+    is still above zero: a ``cancel()`` that nothing matched with
+    ``uncancel()``, which makes a later ``asyncio.timeout`` or ``TaskGroup`` in
+    that task mistake it for a cancellation from outside. Libraries that leak
+    cancel requests (and code that swallows ``CancelledError``) trip it."""
 
     def replace(self, **changes: Any) -> SimConfig:
         return dataclasses.replace(self, **changes)
@@ -178,6 +185,7 @@ class Simulation:
             max_steps=config.max_steps,
             max_time=config.max_time,
             step_time=config.step_time,
+            strict_cancellation=config.strict_cancellation,
         )
         self.network = Network(self.loop, link=config.link, connect_timeout=config.connect_timeout)
         self.loop.network = self.network
@@ -456,6 +464,8 @@ def _classify(exc: BaseException) -> Failure:
         return Failure("step_limit", str(exc), "step_limit", exc)
     if isinstance(exc, TimeLimitExceeded):
         return Failure("time_limit", str(exc), "time_limit", exc)
+    if isinstance(exc, CancellationLeak):
+        return Failure("cancel_leak", str(exc), f"cancel_leak:{exc.coroutine}", exc)
     if isinstance(exc, NondeterminismError):
         return Failure("nondeterminism", str(exc), "nondeterminism", exc)
     message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__

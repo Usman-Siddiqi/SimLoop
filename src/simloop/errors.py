@@ -31,6 +31,18 @@ class InvariantViolation(SimulationError):
         self.property_name = property_name
 
 
+class CancellationLeak(SimulationError):
+    """A task finished with cancellation requests nobody consumed.
+
+    Raised only with ``SimConfig(strict_cancellation=True)``.
+    """
+
+    def __init__(self, message: str, task_name: str, coroutine: str) -> None:
+        super().__init__(message)
+        self.task_name = task_name
+        self.coroutine = coroutine
+
+
 class NondeterminismError(RuntimeError):
     """Code inside a simulation touched a real, non-deterministic resource.
 

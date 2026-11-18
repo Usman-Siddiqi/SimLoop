@@ -249,6 +249,7 @@ Inside a simulation:
 | `link` | `LinkConfig()` | Default link: latency 1 to 10 ms, no drops, duplicates or resets |
 | `connect_timeout` | `30.0` | How long a TCP connect keeps retrying an unreachable host |
 | `buggify` | `True` | Let `faults.buggify()` sites fire |
+| `strict_cancellation` | `False` | Fail when a task keeps running with a `cancel()` request nobody consumed (no matching `uncancel()`) and then finishes normally (below) |
 
 ### Simulated network
 
@@ -379,6 +380,16 @@ fast until it is fixed. Options: `--simloop-seeds N`, `--simloop-start N`,
 | `unhandled` | A background task's exception was never retrieved, or a callback raised |
 | `step_limit` / `time_limit` | The run did not finish within its budget |
 | `nondeterminism` | Code touched a real socket, DNS, a thread or a subprocess |
+| `cancel_leak` | With `strict_cancellation=True`: a task finished normally with `cancelling()` still above zero after it had kept running |
+
+`strict_cancellation` checks the bookkeeping that `asyncio.timeout()` and
+`TaskGroup` rely on since Python 3.11: whoever suppresses a cancellation it
+requested must call `uncancel()`. A leaked request makes a later `TaskGroup`
+in the same task treat the task as cancelled from outside (on 3.13+ the next
+`await` raises `CancelledError`). A task that takes a cancellation and ends
+in that same step, like a catch-all at the top of a request handler, is not
+flagged. It is off by default because code that swallows `CancelledError`
+on purpose trips it too.
 
 Failures are grouped by a signature (failure kind, exception type and the
 source line it was raised from, or the property name), so 100 failing seeds
