@@ -140,6 +140,7 @@ class Simulation:
             self.loop.step_hooks.append(self._make_gc_hook(config.gc_interval))
         self.random: random.Random = ChoiceRandom(self.choices)
         self.sandbox: Sandbox | None = None
+        self._failed_at: tuple[int, float] | None = None
 
     def _make_gc_hook(self, interval: int) -> Callable[[], None]:
         loop = self.loop
@@ -190,13 +191,15 @@ class Simulation:
                     f"nondeterminism:{sandbox.leaks[0].split(' ', 1)[0]}",
                     NondeterminismError(sandbox.leaks[0]),
                 )
+        # A failed run reports where it failed, not where cleanup ended.
+        steps, end_time = self._failed_at or (loop.steps, loop.time())
         return RunResult(
             seed=self.seed,
             config=self.config,
             value=value,
             failure=failure,
-            steps=loop.steps,
-            sim_time=loop.time() - self.config.start_time,
+            steps=steps,
+            sim_time=end_time - self.config.start_time,
             wall_time=_wall_clock() - started,
             trace=self.trace,
             choices=list(self.choices.record),
@@ -205,6 +208,7 @@ class Simulation:
     def _fail(self, failure: Failure) -> Failure:
         self.loop._record("failed", "sim", failure.message.splitlines()[0])
         self.trace.freeze()
+        self._failed_at = (self.loop.steps, self.loop.time())
         return failure
 
     @contextlib.contextmanager
