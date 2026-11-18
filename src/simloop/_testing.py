@@ -47,6 +47,9 @@ class TestSettings:
     shrink: bool | None = None
     database: Path | None = field(default_factory=lambda: Path(".simloop") / "examples")
     trace_last: int = 30
+    confirm: int = 200
+    """Seeds to search with asyncio's own callback order when a failure is
+    found under the random scheduler; 0 skips the check."""
 
 
 settings = TestSettings()
@@ -271,7 +274,12 @@ def _run_test(
     else:
         seed_range = seeds
     report = explore(
-        main, seeds=seed_range, config=config, max_failures=max_failures, time_budget=time_budget
+        main,
+        seeds=seed_range,
+        config=config,
+        max_failures=max_failures,
+        time_budget=time_budget,
+        confirm=settings.confirm,
     )
     if report.ok:
         database.store([])
@@ -295,6 +303,17 @@ def _run_test(
         shrunk_summary=summary,
         trace_last=settings.trace_last,
     )
+    if group.feasible is False:
+        message += (
+            f"\n\nNOTE: not reproduced in {settings.confirm} seeds with scheduler='fifo' "
+            "plus timer jitter. This interleaving may be impossible on a real asyncio "
+            "loop; check it before treating it as a bug."
+        )
+    elif group.feasible is True and group.feasible_seed is not None:
+        message += (
+            f"\n\nAlso fails with asyncio's own callback order "
+            f"(scheduler='fifo', seed {group.feasible_seed})."
+        )
     if not group.reproducible:
         message += (
             "\n\nWARNING: rerunning this seed produced a different trace; "

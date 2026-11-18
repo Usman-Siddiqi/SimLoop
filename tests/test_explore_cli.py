@@ -111,3 +111,35 @@ def test_cli_module_target_and_fifo(capsys: pytest.CaptureFixture[str]) -> None:
 def test_cli_bad_targets(target: str, message: str) -> None:
     with pytest.raises(SystemExit, match=message):
         cli.main(["run", target])
+
+
+async def _impossible_on_asyncio() -> None:
+    # 'x' is scheduled before 'y', so a real loop always runs it first. The
+    # random scheduler may not, because they come from different steps.
+    loop = asyncio.get_running_loop()
+    order: list[str] = []
+    loop.call_soon(lambda: loop.call_soon(order.append, "x"))
+    loop.call_soon(lambda: loop.call_soon(order.append, "y"))
+    await asyncio.sleep(0.1)
+    assert order == ["x", "y"], order
+
+
+def test_confirm_marks_failures_that_need_an_impossible_order() -> None:
+    report = simloop.explore(_impossible_on_asyncio, seeds=range(20), confirm=30)
+    assert len(report.groups) == 1
+    assert report.groups[0].feasible is False
+    assert "may be impossible on a real asyncio loop" in report.summary()
+    assert simloop.confirm_feasible(_impossible_on_asyncio, report.groups[0].signature) is None
+
+
+def test_confirm_reproduces_timing_races_with_asyncio_order() -> None:
+    report = simloop.explore(inventory.main, seeds=range(100), confirm=100)
+    group = report.groups[0]
+    assert group.feasible is True
+    assert group.feasible_config is not None
+    assert group.feasible_config.scheduler == "fifo"
+    assert group.feasible_seed is not None
+    rerun = simloop.run(inventory.main, seed=group.feasible_seed, config=group.feasible_config)
+    assert rerun.failure is not None
+    assert rerun.failure.signature == group.signature
+    assert "asyncio order: reproduced" in report.summary()

@@ -126,6 +126,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         config=_config(args),
         max_failures=args.max_failures,
         time_budget=args.time_budget,
+        confirm=args.confirm,
     )
     print(report.summary())
     if report.ok:
@@ -216,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
     explore_parser.add_argument("--start", type=int, default=0, help="first seed")
     explore_parser.add_argument("--max-failures", type=int, default=None)
     explore_parser.add_argument("--time-budget", type=float, default=None, help="wall seconds")
+    explore_parser.add_argument(
+        "--confirm",
+        type=int,
+        default=200,
+        help="seeds to search with asyncio's own order for each random-scheduler failure (0: skip)",
+    )
     explore_parser.set_defaults(handler=_cmd_explore)
 
     check_parser = sub.add_parser(

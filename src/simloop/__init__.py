@@ -2,7 +2,7 @@
 
 from . import faults
 from ._choices import ChoiceSource
-from ._explore import ExploreReport, FailureGroup, explore
+from ._explore import ExploreReport, FailureGroup, confirm_feasible, explore
 from ._loop import SimEventLoop
 from ._properties import Property
 from ._repro import Reproduction
@@ -72,6 +72,7 @@ __all__ = [
     "__version__",
     "always",
     "check_determinism",
+    "confirm_feasible",
     "current",
     "current_host",
     "eventually",

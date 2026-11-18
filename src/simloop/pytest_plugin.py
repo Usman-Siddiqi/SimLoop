@@ -26,6 +26,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--simloop-no-db", action="store_true", help="do not read or write .simloop/examples"
     )
     group.addoption(
+        "--simloop-confirm",
+        type=int,
+        default=200,
+        help="fifo seeds searched to confirm a random-scheduler failure (0: skip)",
+    )
+    group.addoption(
         "--simloop-trace-last", type=int, default=30, help="trace events shown on failure"
     )
 
@@ -37,6 +43,7 @@ def pytest_configure(config: pytest.Config) -> None:
     settings.seed = config.getoption("simloop_seed")
     settings.shrink = False if config.getoption("simloop_no_shrink") else None
     settings.trace_last = config.getoption("simloop_trace_last")
+    settings.confirm = config.getoption("simloop_confirm")
     root = Path(config.rootpath)
     settings.database = (
         None if config.getoption("simloop_no_db") else root / ".simloop" / "examples"
