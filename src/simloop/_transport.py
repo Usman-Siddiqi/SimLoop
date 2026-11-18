@@ -127,6 +127,7 @@ class StreamTransport(asyncio.Transport):
         self._paused = False
         self._pending: deque[Segment] = deque()
         self._held: deque[Segment] = deque()
+        self._replay_scheduled = False
         self._eof_received = False
         self._socket = SimSocket(
             socket.SOCK_STREAM, local, remote, network=network, readable=self._socket_readable
@@ -269,31 +270,39 @@ class StreamTransport(asyncio.Transport):
     def _arrive(self, segment: Segment, sender: Host) -> None:
         if not self._host.up:
             return
+        # Once anything is held, later segments queue behind it, including
+        # ones still in flight when the partition heals: TCP delivers in order.
         if self._held or self._network._blocked_between(sender, self._host):
-            if not self._held:
+            if not self._held and not self._replay_scheduled:
                 self._network._hold_until_heal(self._flush_held)
             self._held.append(segment)
             return
         self._accept_segment(segment)
 
     def _flush_held(self) -> None:
-        held, self._held = self._held, deque()
         peer = self.peer
-        if peer is None:
+        if peer is None or not self._held:
+            self._held.clear()
             return
-        arrival = self._loop.time()
-        for segment in held:
-            arrival = max(
-                arrival, self._loop.time() + self._network._segment_delay(peer._host, self._host)
-            )
-            self._loop._call_at_exact(
-                arrival,
-                self._arrive,
-                segment,
-                peer._host,
-                context=self._context,
-                origin=self._origin,
-            )
+        # Retransmission after the heal: everything held arrives together, one
+        # link delay from now, followed by whatever was still in flight.
+        arrival = self._loop.time() + self._network._segment_delay(peer._host, self._host)
+        peer._next_arrival = max(peer._next_arrival, arrival)
+        self._replay_scheduled = True
+        self._loop._call_at_exact(
+            arrival, self._replay_held, peer._host, context=self._context, origin=self._origin
+        )
+
+    def _replay_held(self, sender: Host) -> None:
+        self._replay_scheduled = False
+        if not self._host.up:
+            self._held.clear()
+            return
+        if self._network._blocked_between(sender, self._host):
+            self._network._hold_until_heal(self._flush_held)
+            return
+        while self._held:
+            self._accept_segment(self._held.popleft())
 
     def _accept_segment(self, segment: Segment) -> None:
         kind, _payload = segment

@@ -122,6 +122,14 @@ properties and fault mixes only.
   exercised (13 connections for 43 requests in a fault-free run), which
   needed SimLoop to answer httpcore's zero-timeout `select.poll` readiness
   check on idle sockets.
+- **websockets 17.4**, [`findings/websockets_keepalive.py`](../findings/websockets_keepalive.py):
+  an echo server behind random partitions (0.2-4 s, every 0.5-3 s); every
+  echo came back in order, and no `recv()` waited longer than ping interval +
+  ping timeout + close timeout on a dead link, across 1000 seeds each with
+  the random scheduler and with `fifo` plus 2 ms jitter. Keepalive closed
+  the connection 68 times in 30 sample runs. An early "lost message" failure
+  here was a SimLoop bug (segments in flight when a partition healed could
+  overtake the held ones), now fixed.
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.

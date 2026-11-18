@@ -558,3 +558,73 @@ def test_select_and_poll_see_simulated_connection_state() -> None:
         return seen
 
     assert run_ok(main).value == [True, [], [], True, True]
+
+
+async def _held_then_fresh() -> list[bytes]:
+    net = simloop.network()
+    healed = asyncio.Event()
+
+    async def talker() -> None:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readline()
+            writer.write(b"held\n")  # sent while partitioned
+            await healed.wait()
+            writer.write(b"fresh\n")  # sent the moment the partition heals
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, port=3)
+        async with server:
+            await server.serve_forever()
+
+    net.add_host("talker", entry=talker)
+    net.set_link("main", "talker", latency=(0.001, 0.05))
+    await asyncio.sleep(0.01)
+    reader, writer = await asyncio.open_connection("talker", 3)
+    writer.write(b"go\n")
+    await asyncio.sleep(0.06)
+    net.partition(["main"], ["talker"])
+    await asyncio.sleep(1)
+    net.heal()
+    healed.set()
+    lines = [await reader.readline(), await reader.readline()]
+    writer.close()
+    return lines
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_stream_order_survives_a_partition_heal(seed: int) -> None:
+    assert run_ok(_held_then_fresh, seed=seed, scheduler="fifo").value == [b"held\n", b"fresh\n"]
+
+
+def test_segments_in_flight_at_heal_stay_behind_held_ones() -> None:
+    async def main() -> list[bytes]:
+        net = simloop.network()
+        received: list[bytes] = []
+        done = asyncio.Event()
+
+        async def sink() -> None:
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                received.extend([await reader.readline(), await reader.readline()])
+                done.set()
+                writer.close()
+
+            server = await asyncio.start_server(handle, port=4)
+            async with server:
+                await server.serve_forever()
+
+        net.add_host("sink", entry=sink)
+        net.set_link("main", "sink", latency=0.05)
+        await asyncio.sleep(0.01)
+        _reader, writer = await asyncio.open_connection("sink", 4)
+        net.partition(["main"], ["sink"])
+        writer.write(b"first\n")  # arrives during the partition: held
+        await asyncio.sleep(0.04)
+        writer.write(b"second\n")  # still in flight when the partition heals
+        await asyncio.sleep(0.02)
+        net.heal()
+        await done.wait()
+        writer.close()
+        return received
+
+    assert run_ok(main, scheduler="fifo").value == [b"first\n", b"second\n"]
