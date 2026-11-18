@@ -19,6 +19,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
+from .errors import UnsupportedOperation
 from .net import Host, Network
 
 if TYPE_CHECKING:
@@ -637,23 +638,47 @@ async def create_connection(
     local_addr: tuple[str, int] | None = None,
     **_: Any,
 ) -> tuple[StreamTransport, asyncio.BaseProtocol]:
-    _reject_unsupported(ssl=ssl, sock=sock)
-    if host is None or port is None:
-        raise ValueError("host and port was not specified and no sock specified")
+    _reject_unsupported(ssl=ssl)
+    if sock is not None:
+        if host is not None or port is not None:
+            raise ValueError("host/port and sock can not be specified at the same time")
+        client = _virtual(sock)._take_transport()
+    else:
+        if host is None or port is None:
+            raise ValueError("host and port was not specified and no sock specified")
+        client = await connect_stream(network, host, int(port), local_addr=local_addr)
+    protocol = protocol_factory()
+    client._protocol = protocol
+    protocol.connection_made(client)
+    client._drain_pending()
+    return client, protocol
+
+
+async def connect_stream(
+    network: Network,
+    host: str,
+    port: int,
+    *,
+    local_addr: tuple[str, int] | None = None,
+    local_port: int | None = None,
+) -> StreamTransport:
+    """Open a TCP connection and return its client end, not yet attached to a protocol.
+
+    ``local_port`` is an already-claimed port (from a bound virtual socket).
+    """
     source = network.current_host()
     if not source.up:
         raise OSError(errno.ENETDOWN, f"host {source.name!r} is down")
     target = network.resolve(host, origin=source)
-    port = int(port)
-    if local_addr is not None:
-        network._bind_address(source, local_addr[0])
-        local_port = network._claim_port(source, int(local_addr[1]))
-    else:
-        local_port = network._claim_port(source, 0)
+    if local_port is None:
+        if local_addr is not None:
+            network._bind_address(source, local_addr[0])
+            local_port = network._claim_port(source, int(local_addr[1]))
+        else:
+            local_port = network._claim_port(source, 0)
     local = (source.ip, local_port)
     remote = (target.ip, port)
-    context = contextvars.copy_context()
-    client = StreamTransport(network, source, local, remote, context)
+    client = StreamTransport(network, source, local, remote, contextvars.copy_context())
     network._record(source.name, "connect", f"{local[0]}:{local[1]} -> {remote[0]}:{remote[1]}")
     try:
         await _handshake(network, client, target, port)
@@ -662,11 +687,7 @@ async def create_connection(
             client._send("rst")
         client._release()
         raise
-    protocol = protocol_factory()
-    client._protocol = protocol
-    protocol.connection_made(client)
-    client._drain_pending()
-    return client, protocol
+    return client
 
 
 async def _handshake(network: Network, client: StreamTransport, target: Host, port: int) -> None:
@@ -715,13 +736,16 @@ async def create_server(
     start_serving: bool = True,
     **_: Any,
 ) -> SimServer:
-    _reject_unsupported(ssl=ssl, sock=sock)
+    _reject_unsupported(ssl=ssl)
     owner = network.current_host()
     if not owner.up:
         raise OSError(errno.ENETDOWN, f"host {owner.name!r} is down")
-    for address in host if isinstance(host, list) else [host]:
-        network._bind_address(owner, address)
-    bound = network._claim_port(owner, int(port or 0))
+    if sock is not None:
+        bound = _virtual(sock)._take_listening_port()
+    else:
+        for address in host if isinstance(host, list) else [host]:
+            network._bind_address(owner, address)
+        bound = network._claim_port(owner, int(port or 0))
     server = SimServer(network, owner, bound, protocol_factory, contextvars.copy_context())
     network._listeners[(owner.name, bound)] = server
     network._record(owner.name, "listen", f"{owner.ip}:{bound}")
@@ -739,15 +763,19 @@ async def create_datagram_endpoint(
     sock: Any = None,
     **_: Any,
 ) -> tuple[DatagramEndpoint, asyncio.DatagramProtocol]:
-    _reject_unsupported(sock=sock)
     owner = network.current_host()
     if not owner.up:
         raise OSError(errno.ENETDOWN, f"host {owner.name!r} is down")
-    port = 0
-    if local_addr is not None:
-        network._bind_address(owner, local_addr[0])
-        port = int(local_addr[1])
-    bound = network._claim_port(owner, port)
+    if sock is not None:
+        virtual = _virtual(sock)
+        bound = virtual._take_bound_port()
+        remote_addr = remote_addr or virtual._peer
+    else:
+        port = 0
+        if local_addr is not None:
+            network._bind_address(owner, local_addr[0])
+            port = int(local_addr[1])
+        bound = network._claim_port(owner, port)
     remote: Address | None = None
     if remote_addr is not None:
         target = network.resolve(remote_addr[0], origin=owner)
@@ -763,9 +791,164 @@ async def create_datagram_endpoint(
     return endpoint, protocol
 
 
-def _reject_unsupported(**options: Any) -> None:
-    from .errors import UnsupportedOperation
+def _virtual(sock: Any) -> VirtualSocket:
+    if not isinstance(sock, VirtualSocket):
+        raise UnsupportedOperation(
+            "only sockets created inside the simulation can be passed as sock="
+        )
+    return sock
 
+
+async def sock_connect(network: Network, sock: Any, address: Any) -> None:
+    virtual = _virtual(sock)
+    if virtual.type == socket.SOCK_DGRAM:
+        virtual.connect(address)
+        return
+    if virtual._transport is not None:
+        raise OSError(errno.EISCONN, "Transport endpoint is already connected")
+    host, port = str(address[0]), int(address[1])
+    transport = await connect_stream(network, host, port, local_port=virtual._detach_port())
+    virtual._attach(transport)
+
+
+class VirtualSocket:
+    """What ``socket.socket()`` returns inside a simulation.
+
+    Supports the non-blocking subset that asyncio code uses before handing a
+    socket to the loop: options, ``bind``, ``listen``, ``loop.sock_connect`` and
+    passing it as ``sock=`` to ``create_connection``/``create_server``/
+    ``create_datagram_endpoint``. Blocking I/O is not simulated.
+    """
+
+    network: Network  # set on the per-simulation subclass
+
+    def __init__(
+        self,
+        family: int = -1,
+        type: int = -1,
+        proto: int = -1,
+        fileno: int | None = None,
+    ) -> None:
+        if fileno is not None:
+            raise UnsupportedOperation("wrapping a real file descriptor is not simulated")
+        self.family = socket.AF_INET if family == -1 else family
+        self.type = socket.SOCK_STREAM if type == -1 else type
+        self.proto = 0 if proto == -1 else proto
+        self._host = self.network.current_host()
+        self._port: int | None = None
+        self._peer: Address | None = None
+        self._transport: StreamTransport | None = None
+        self._listening = False
+        self._closed = False
+        self._timeout: float | None = None
+
+    def __repr__(self) -> str:
+        return f"<VirtualSocket {self._host.name} port={self._port} peer={self._peer}>"
+
+    def __enter__(self) -> VirtualSocket:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def fileno(self) -> int:
+        return -1
+
+    def detach(self) -> int:
+        return -1
+
+    def setblocking(self, flag: bool) -> None:
+        self._timeout = None if flag else 0.0
+
+    def settimeout(self, value: float | None) -> None:
+        self._timeout = value
+
+    def gettimeout(self) -> float | None:
+        return self._timeout
+
+    def setsockopt(self, *args: Any) -> None:
+        pass
+
+    def getsockopt(self, *args: Any) -> int:
+        return 0
+
+    def bind(self, address: Any) -> None:
+        if self._port is not None:
+            raise OSError(errno.EINVAL, "Invalid argument")
+        self.network._bind_address(self._host, address[0] or None)
+        self._port = self.network._claim_port(self._host, int(address[1]))
+
+    def listen(self, backlog: int = 0) -> None:
+        if self._port is None:
+            self.bind(("", 0))
+        self._listening = True
+
+    def connect(self, address: Any) -> None:
+        if self.type != socket.SOCK_DGRAM:
+            raise UnsupportedOperation(
+                "blocking connect() is not simulated; use await loop.sock_connect()"
+            )
+        target = self.network.resolve(str(address[0]), origin=self._host)
+        self._peer = (target.ip, int(address[1]))
+
+    def getsockname(self) -> Address:
+        if self._transport is not None:
+            return self._transport._local
+        return (self._host.ip, self._port or 0)
+
+    def getpeername(self) -> Address:
+        if self._peer is None:
+            raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+        return self._peer
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._transport is not None:
+            self._transport.abort()
+            self._transport = None
+        elif self._port is not None:
+            self.network._release_port(self._host, self._port)
+        self._port = None
+
+    def _blocking(self, *args: Any, **kwargs: Any) -> Any:
+        raise UnsupportedOperation("blocking socket I/O is not simulated; use asyncio APIs")
+
+    send = sendall = recv = recv_into = sendto = recvfrom = accept = _blocking
+
+    def _detach_port(self) -> int | None:
+        port, self._port = self._port, None
+        return port
+
+    def _attach(self, transport: StreamTransport) -> None:
+        self._transport = transport
+        self._peer = transport._remote
+
+    def _take_transport(self) -> StreamTransport:
+        if self._transport is None:
+            raise OSError(errno.ENOTCONN, "socket is not connected")
+        transport, self._transport = self._transport, None
+        self._closed = True
+        return transport
+
+    def _take_listening_port(self) -> int:
+        if self._port is None:
+            self.bind(("", 0))
+        port = self._detach_port()
+        assert port is not None
+        self._closed = True
+        return port
+
+    def _take_bound_port(self) -> int:
+        return self._take_listening_port()
+
+
+def virtual_socket_class(network: Network) -> type[VirtualSocket]:
+    return type("socket", (VirtualSocket,), {"network": network})
+
+
+def _reject_unsupported(**options: Any) -> None:
     for name, value in options.items():
         if value:
             raise UnsupportedOperation(f"{name}= is not supported by the simulated network")

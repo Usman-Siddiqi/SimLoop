@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _socket
 import asyncio
 import datetime
 import os
@@ -126,7 +127,7 @@ def _assert_leak(main, fragment: str) -> None:
 def test_real_socket_is_a_leak_even_if_the_error_is_swallowed() -> None:
     async def main() -> str:
         try:
-            socket.socket()
+            _socket.socket()
         except Exception:
             return "swallowed"
         return "created"

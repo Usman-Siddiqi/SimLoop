@@ -631,6 +631,9 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             self._require_network(), protocol_factory, local_addr, remote_addr, **kwargs
         )
 
+    async def sock_connect(self, sock: Any, address: Any) -> None:
+        await _transport.sock_connect(self._require_network(), sock, address)
+
     # -- not simulated: fail closed ----------------------------------------------
 
     create_unix_connection = _unsupported("create_unix_connection")
@@ -644,7 +647,6 @@ class SimEventLoop(asyncio.AbstractEventLoop):
     sock_recvfrom_into = _unsupported("sock_recvfrom_into")
     sock_sendall = _unsupported("sock_sendall")
     sock_sendto = _unsupported("sock_sendto")
-    sock_connect = _unsupported("sock_connect")
     sock_accept = _unsupported("sock_accept")
     sock_sendfile = _unsupported("sock_sendfile")
     add_reader = _unsupported("add_reader")

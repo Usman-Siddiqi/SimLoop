@@ -17,15 +17,18 @@ from __future__ import annotations
 
 import os
 import random
+import socket
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any
 
 from ._choices import derive_seed
 from ._loop import SimEventLoop
+from ._transport import virtual_socket_class
 from .errors import NondeterminismError
 
 _BLOCKED_EVENTS = frozenset(
@@ -80,8 +83,10 @@ class Sandbox:
         self.seed = seed
         self.epoch = epoch
         self.leaks: list[str] = []
+        self.leak_errors: list[NondeterminismError] = []
         self.suspended = False
         self._saved: list[tuple[object, str, object]] = []
+        self._saved_env: dict[str, str] = {}
         self._random_state: tuple[Any, ...] | None = None
         self._bytes = random.Random(derive_seed(seed, "os.urandom"))
 
@@ -91,7 +96,14 @@ class Sandbox:
             message += f" (address {args[1]!r})"
         self.leaks.append(message)
         self.loop._record("leak", self.loop._current_actor(), message)
-        raise NondeterminismError(message)
+        error = NondeterminismError(message)
+        stack = [f for f in traceback.extract_stack()[:-1] if f.filename != __file__]
+        error.add_note(
+            "Leaked from (most recent call last):\n"
+            + "".join(traceback.format_list(stack[-12:])).rstrip()
+        )
+        self.leak_errors.append(error)
+        raise error
 
     # -- patched functions ---------------------------------------------------
 
@@ -107,6 +119,12 @@ class Sandbox:
         if seconds < 0:
             raise ValueError("sleep length must be non-negative")
         self.loop.block_for(seconds)
+
+    def _socket_patches(self) -> list[tuple[object, str, object]]:
+        network = self.loop.network
+        if network is None:
+            return []
+        return [(socket, "socket", virtual_socket_class(network))]
 
     def _thread_start(self, *args: Any, **kwargs: Any) -> None:
         self.report_leak("threading.Thread.start", ())
@@ -158,6 +176,7 @@ class Sandbox:
             (os, "urandom", self._urandom),
             (random, "_urandom", self._urandom),
             (random, "seed", self._random_seed),
+            *self._socket_patches(),
             # Python 3.11 has no audit event for starting a thread.
             (threading.Thread, "start", self._thread_start),
         ]
@@ -174,6 +193,14 @@ class Sandbox:
         for owner, name, replacement in self._patches():
             self._saved.append((owner, name, getattr(owner, name)))
             setattr(owner, name, replacement)
+        # A simulated network has no proxy; proxy settings inherited from the
+        # real environment would send simulated traffic to an address that does
+        # not exist (and make runs machine-dependent).
+        self._saved_env = {
+            key: value for key, value in os.environ.items() if key.lower().endswith("_proxy")
+        }
+        for key in self._saved_env:
+            del os.environ[key]
         _local.sandbox = self
         return self
 
@@ -184,6 +211,7 @@ class Sandbox:
         tb: TracebackType | None,
     ) -> None:
         _local.sandbox = None
+        os.environ.update(self._saved_env)
         for owner, name, original in reversed(self._saved):
             setattr(owner, name, original)
         self._saved.clear()

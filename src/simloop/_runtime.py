@@ -196,7 +196,7 @@ class Simulation:
                     "nondeterminism",
                     sandbox.leaks[0],
                     f"nondeterminism:{sandbox.leaks[0].split(' ', 1)[0]}",
-                    NondeterminismError(sandbox.leaks[0]),
+                    sandbox.leak_errors[0],
                 )
         # A failed run reports where it failed, not where cleanup ended.
         steps, end_time = self._failed_at or (loop.steps, loop.time())

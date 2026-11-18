@@ -455,3 +455,28 @@ def test_network_runs_are_deterministic() -> None:
     assert all(r.ok for r in runs)
     assert len({r.digest for r in runs}) == 1
     assert simloop.run(main, seed=12).digest != runs[0].digest
+
+
+def test_virtual_sockets_for_libraries_that_bring_their_own() -> None:
+    async def main() -> list[object]:
+        loop = asyncio.get_running_loop()
+        listener = socket.socket()
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        server = await asyncio.start_server(echo_handler, sock=listener)
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.setblocking(False)
+        await loop.sock_connect(client, ("127.0.0.1", port))
+        reader, writer = await asyncio.open_connection(sock=client)
+        reply = await ask(reader, writer, "via sock")
+        writer.close()
+        server.close()
+        try:
+            socket.socket().recv(1)
+        except simloop.UnsupportedOperation:
+            blocking = "blocking I/O rejected"
+        return [type(listener).__name__, reply, blocking]
+
+    assert run_ok(main).value == ["socket", b"echo via sock\n", "blocking I/O rejected"]
