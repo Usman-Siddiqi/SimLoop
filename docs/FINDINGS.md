@@ -87,10 +87,15 @@ None yet.
 - **Why it is not a bug:** asyncio's ready queue is FIFO, and on the selector
   loop `data_received` and the end-of-stream read happen in different loop
   iterations, so the wakeup always runs before `connection_lost` is called.
-  With `scheduler="fifo"` (with and without timer jitter) none of 400 seeds
-  fail, and `explore --confirm 300` reports the group as not reproduced with
-  asyncio's order. This case is why `explore` now checks feasibility by
-  default.
+  With `scheduler="fifo"` (with and without 2 ms timer jitter) none of 300
+  seeds fail, and `explore --confirm 300` reports the group as not
+  reproduced with asyncio's order. The same group shows up in the httpx
+  harness, which uses an aiohttp server. This case is why `explore` now
+  checks feasibility by default.
+- **SimLoop fix found on the way:** an incoming RST used to call
+  `connection_lost` synchronously, so for a while the same `TypeError` also
+  "reproduced" under FIFO. Real asyncio reports the loss from a later
+  callback (`_force_close`); SimLoop now does the same.
 
 ## Tested, nothing found
 
@@ -107,9 +112,16 @@ properties and fault mixes only.
 - **aiohttp 3.14.5**, [`findings/aiohttp_pool.py`](../findings/aiohttp_pool.py):
   every response matched its request, the pool served `limit` concurrent
   requests after faults stopped, and no connection stayed acquired, across
-  400 seeds with `scheduler="fifo"` (with and without 2 ms timer jitter),
+  300 seeds each with `scheduler="fifo"` and with 2 ms timer jitter,
   random client timeouts and cancellations, 0.5% TCP resets per segment and
   server crashes every 0.3-1.5 s.
+- **httpx 0.28.1 / httpcore 1.0.9**, [`findings/httpx_pool.py`](../findings/httpx_pool.py):
+  same properties and faults as the aiohttp harness with a 3-connection
+  pool, plus cancellation of in-flight requests; 300 seeds each with
+  `scheduler="fifo"` and with 2 ms jitter, all clean. Keep-alive reuse is
+  exercised (13 connections for 43 requests in a fault-free run), which
+  needed SimLoop to answer httpcore's zero-timeout `select.poll` readiness
+  check on idle sockets.
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.

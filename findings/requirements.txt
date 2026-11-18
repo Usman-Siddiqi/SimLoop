@@ -4,3 +4,5 @@ async-lru==2.4.0
 redis==8.1.0
 aiorwlock==1.6.0
 aiohttp==3.14.5
+httpx==0.28.1
+httpcore==1.0.9

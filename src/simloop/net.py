@@ -17,7 +17,9 @@ import asyncio
 import contextvars
 import errno
 import ipaddress
+import itertools
 import socket
+import weakref
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -25,6 +27,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ._loop import SimEventLoop
     from ._transport import DatagramEndpoint, SimServer, StreamTransport
+
+VIRTUAL_FD_BASE = 1 << 20
+"""Simulated sockets get descriptors from here up, far above any real one."""
 
 _current_host: contextvars.ContextVar[Host | None] = contextvars.ContextVar(
     "simloop_current_host", default=None
@@ -243,6 +248,8 @@ class Network:
         self._datagrams: dict[tuple[str, int], DatagramEndpoint] = {}
         self._used_ports: dict[tuple[str, int], int] = {}
         self._paused_hosts = 0
+        self._fd_counter = itertools.count(VIRTUAL_FD_BASE)
+        self._sockets_by_fd: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
         self.default_host = self.add_host("main")
 
     # -- hosts ---------------------------------------------------------------------
@@ -462,6 +469,15 @@ class Network:
     async def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         host = self.resolve(str(sockaddr[0]))
         return host.name, str(sockaddr[1])
+
+    def _register_fd(self, sock: Any) -> int:
+        fd = next(self._fd_counter)
+        self._sockets_by_fd[fd] = sock
+        return fd
+
+    def socket_for_fd(self, fd: int) -> Any:
+        """The simulated socket behind a virtual descriptor, or ``None``."""
+        return self._sockets_by_fd.get(fd)
 
     def _shutdown(self) -> None:
         """Power everything off at the end of a run without running callbacks."""

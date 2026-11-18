@@ -35,15 +35,36 @@ _SYN_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 
 
 class SimSocket:
-    """Stand-in for ``transport.get_extra_info("socket")``. Owns no file descriptor."""
+    """Stand-in for ``transport.get_extra_info("socket")``.
+
+    It owns no OS descriptor. ``fileno()`` returns a virtual one that the
+    sandboxed ``select.select`` / ``select.poll`` understand, so libraries that
+    poll an idle socket to see whether the peer closed it (httpcore,
+    urllib3-style pools) see the simulated connection's state.
+    """
 
     family = socket.AF_INET
 
-    def __init__(self, kind: int, sockname: Address, peername: Address | None = None) -> None:
+    def __init__(
+        self,
+        kind: int,
+        sockname: Address,
+        peername: Address | None = None,
+        *,
+        network: Network | None = None,
+        readable: Callable[[], bool] | None = None,
+    ) -> None:
         self.type = kind
         self.proto = socket.IPPROTO_TCP if kind == socket.SOCK_STREAM else socket.IPPROTO_UDP
         self._sockname = sockname
         self._peername = peername
+        self._readable = readable
+        self._fd = -1
+        if network is not None:
+            self._fd = network._register_fd(self)
+
+    def readable(self) -> bool:
+        return self._readable() if self._readable is not None else False
 
     def getsockname(self) -> Address:
         return self._sockname
@@ -60,7 +81,7 @@ class SimSocket:
         return 0
 
     def fileno(self) -> int:
-        return -1
+        return self._fd
 
     def setblocking(self, flag: bool) -> None:
         pass
@@ -106,7 +127,10 @@ class StreamTransport(asyncio.Transport):
         self._paused = False
         self._pending: deque[Segment] = deque()
         self._held: deque[Segment] = deque()
-        self._socket = SimSocket(socket.SOCK_STREAM, local, remote)
+        self._eof_received = False
+        self._socket = SimSocket(
+            socket.SOCK_STREAM, local, remote, network=network, readable=self._socket_readable
+        )
         host._streams[self] = None
 
     def __repr__(self) -> str:
@@ -116,6 +140,12 @@ class StreamTransport(asyncio.Transport):
     @property
     def _label(self) -> str:
         return f"{self._local[0]}:{self._local[1]} -> {self._remote[0]}:{self._remote[1]}"
+
+    def _socket_readable(self) -> bool:
+        # Data is handed to the protocol as soon as it arrives, so the kernel
+        # buffer only holds what is waiting while reading is paused, or the
+        # end-of-stream / reset that a recv() would report.
+        return bool(self._pending) or self._eof_received or self._dead
 
     # -- asyncio.Transport API ---------------------------------------------------------
 
@@ -268,10 +298,18 @@ class StreamTransport(asyncio.Transport):
     def _accept_segment(self, segment: Segment) -> None:
         kind, _payload = segment
         if kind == "rst":
+            self._eof_received = True
             if not self._dead:
                 self._network._record(self._host.name, "reset", f"{self._label} by peer")
+                # Like asyncio's _force_close: stop reading now, but report the
+                # loss from a later callback, after anything already scheduled.
                 self._closing = True
-                self._lose(ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"))
+                self._pending.clear()
+                self._loop.call_soon(
+                    self._lose,
+                    ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"),
+                    context=self._context,
+                )
             return
         if self._dead or (self._closing and kind == "data"):
             if kind == "data" and self.peer is not None and not self.peer._dead:
@@ -298,7 +336,7 @@ class StreamTransport(asyncio.Transport):
         )
 
     def _drain_pending(self) -> None:
-        while self._pending and not self._paused and not self._dead:
+        while self._pending and not self._paused and not self._closing:
             self._deliver(self._pending.popleft())
 
     def _deliver(self, segment: Segment) -> None:
@@ -310,6 +348,7 @@ class StreamTransport(asyncio.Transport):
             assert isinstance(protocol, asyncio.Protocol)
             protocol.data_received(payload)
         elif kind == "fin":
+            self._eof_received = True
             if self._closing:
                 return
             assert isinstance(protocol, asyncio.Protocol)
@@ -372,7 +411,7 @@ class SimServer(asyncio.AbstractServer):
         self._connections: dict[StreamTransport, None] = {}
         self._waiters: list[asyncio.Future[None]] = []
         self._serving_forever: asyncio.Future[None] | None = None
-        self.sockets = (SimSocket(socket.SOCK_STREAM, (host.ip, port)),)
+        self.sockets = (SimSocket(socket.SOCK_STREAM, (host.ip, port), network=network),)
 
     def __repr__(self) -> str:
         return f"<SimServer {self._host.name} {self._host.ip}:{self._port}>"
@@ -522,7 +561,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
         self._remote = remote
         self._context = context
         self._closing = False
-        self._socket = SimSocket(socket.SOCK_DGRAM, (host.ip, port), remote)
+        self._socket = SimSocket(socket.SOCK_DGRAM, (host.ip, port), remote, network=network)
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         info = {
@@ -841,6 +880,11 @@ class VirtualSocket:
         self._listening = False
         self._closed = False
         self._timeout: float | None = None
+        self._fd = self.network._register_fd(self)
+
+    def readable(self) -> bool:
+        transport = self._transport
+        return transport is not None and transport._socket_readable()
 
     def __repr__(self) -> str:
         return f"<VirtualSocket {self._host.name} port={self._port} peer={self._peer}>"
@@ -852,7 +896,7 @@ class VirtualSocket:
         self.close()
 
     def fileno(self) -> int:
-        return -1
+        return self._fd
 
     def detach(self) -> int:
         return -1

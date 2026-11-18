@@ -78,7 +78,7 @@ async def workload() -> None:
         api = net.host("api")
         if not api.up:
             api.restart()
-        net.set_link("main", "api", latency=0.001)
+        net.set_link("main", "api", latency=0.001, reset=0.0)
         await asyncio.sleep(1)
         # The pool must still serve `limit` concurrent requests.
         results = await asyncio.wait_for(

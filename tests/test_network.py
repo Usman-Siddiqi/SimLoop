@@ -480,3 +480,81 @@ def test_virtual_sockets_for_libraries_that_bring_their_own() -> None:
         return [type(listener).__name__, reply, blocking]
 
     assert run_ok(main).value == ["socket", b"echo via sock\n", "blocking I/O rejected"]
+
+
+def test_reset_is_reported_after_callbacks_scheduled_by_earlier_data() -> None:
+    # asyncio's _force_close reports connection_lost from a later callback, so
+    # work scheduled while handling the last data runs first.
+    async def main() -> list[str]:
+        net = simloop.network()
+        events: list[str] = []
+        loop = asyncio.get_running_loop()
+
+        async def rude_server() -> None:
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                await reader.readline()
+                writer.write(b"bye")
+                writer.transport.abort()
+
+            server = await asyncio.start_server(handle, port=9)
+            async with server:
+                await server.serve_forever()
+
+        class Client(asyncio.Protocol):
+            def connection_made(self, transport: asyncio.BaseTransport) -> None:
+                assert isinstance(transport, asyncio.Transport)
+                transport.write(b"hi\n")
+
+            def data_received(self, data: bytes) -> None:
+                events.append("data")
+                loop.call_soon(events.append, "scheduled by data")
+
+            def connection_lost(self, exc: Exception | None) -> None:
+                events.append(f"lost {type(exc).__name__}")
+
+        net.add_host("rude", entry=rude_server)
+        net.set_link("rude", "main", latency=0.01)
+        await asyncio.sleep(0.01)
+        await loop.create_connection(Client, "rude", 9)
+        await asyncio.sleep(1)
+        return events
+
+    result = run_ok(main, scheduler="fifo")
+    assert result.value == ["data", "scheduled by data", "lost ConnectionResetError"]
+
+
+def test_select_and_poll_see_simulated_connection_state() -> None:
+    import select
+
+    async def main() -> list[object]:
+        net = simloop.network()
+
+        async def closer() -> None:
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                await reader.readline()
+                writer.close()
+
+            server = await asyncio.start_server(handle, port=5)
+            async with server:
+                await server.serve_forever()
+
+        net.add_host("closer", entry=closer)
+        await asyncio.sleep(0.01)
+        _reader, writer = await asyncio.open_connection("closer", 5)
+        sock = writer.get_extra_info("socket")
+        seen: list[object] = [sock.fileno() >= 0, select.select([sock], [], [], 0)[0]]
+        poller = select.poll()
+        poller.register(sock, select.POLLIN)
+        seen.append(poller.poll(0))
+        writer.write(b"bye\n")
+        await asyncio.sleep(1)  # the server closes its end
+        seen.append(select.select([sock], [], [], 0)[0] == [sock])
+        seen.append(poller.poll(0) == [(sock.fileno(), select.POLLIN)])
+        with pytest.raises(simloop.UnsupportedOperation, match="stall"):
+            select.select([], [], [], 1.0)
+        with pytest.raises(simloop.UnsupportedOperation, match="not a simulated socket"):
+            select.select([0], [], [], 0)
+        writer.close()
+        return seen
+
+    assert run_ok(main).value == [True, [], [], True, True]

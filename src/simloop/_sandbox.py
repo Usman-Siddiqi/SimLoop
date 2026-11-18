@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import random
+import select
 import socket
 import sys
 import threading
@@ -29,6 +30,7 @@ from typing import Any
 from ._choices import derive_seed
 from ._loop import SimEventLoop
 from ._transport import virtual_socket_class
+from ._vselect import VirtualSelect
 from .errors import NondeterminismError
 
 _BLOCKED_EVENTS = frozenset(
@@ -127,7 +129,14 @@ class Sandbox:
         network = self.loop.network
         if network is None:
             return []
-        return [(socket, "socket", virtual_socket_class(network))]
+        selector = VirtualSelect(network)
+        patches: list[tuple[object, str, object]] = [
+            (socket, "socket", virtual_socket_class(network)),
+            (select, "select", selector.select),
+        ]
+        if hasattr(select, "poll"):
+            patches.append((select, "poll", selector.poll))
+        return patches
 
     def _thread_start(self, *args: Any, **kwargs: Any) -> None:
         self.report_leak("threading.Thread.start", ())
