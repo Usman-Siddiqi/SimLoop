@@ -64,6 +64,7 @@ def _config(args: argparse.Namespace) -> SimConfig:
         timer_jitter=args.jitter,
         max_steps=args.max_steps or None,
         max_time=args.max_time,
+        step_time=args.step_time,
     )
 
 
@@ -75,6 +76,10 @@ def _reproduce_command(args: argparse.Namespace, seed: int) -> str:
         parts += ["--jitter", repr(args.jitter)]
     if args.max_time is not None:
         parts += ["--max-time", repr(args.max_time)]
+    if args.max_steps != 1_000_000:
+        parts += ["--max-steps", str(args.max_steps)]
+    if args.step_time:
+        parts += ["--step-time", repr(args.step_time)]
     return " ".join(parts)
 
 
@@ -207,6 +212,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--jitter", type=float, default=0.0, help="max timer jitter (seconds)")
     common.add_argument("--max-steps", type=int, default=1_000_000, help="0 for no limit")
     common.add_argument("--max-time", type=float, default=None, help="simulated seconds")
+    common.add_argument(
+        "--step-time", type=float, default=0.0, help="simulated seconds each callback takes"
+    )
     common.add_argument(
         "--trace-last", type=int, default=30, help="trace events to show on failure"
     )

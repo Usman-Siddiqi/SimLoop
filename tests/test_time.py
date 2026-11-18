@@ -9,6 +9,7 @@ import pytest
 import simloop
 
 from .helpers import run_ok
+from .workloads import busy_system
 
 
 def test_sleep_advances_simulated_time_only() -> None:
@@ -134,3 +135,48 @@ def test_jitter_can_reorder_close_timers() -> None:
         for s in range(40)
     }
     assert outcomes == {"first,second", "second,first"}
+
+
+async def _spin_until_the_clock_moves() -> int:
+    # The shape of a float-rounding wait: re-arm a timer for "now" until the
+    # clock has moved at all.
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    done = loop.create_future()
+    spins = 0
+
+    def check() -> None:
+        nonlocal spins
+        spins += 1
+        if loop.time() > start:
+            done.set_result(None)
+        else:
+            loop.call_at(start, check)
+
+    loop.call_at(start, check)
+    await done
+    return spins
+
+
+def test_a_zero_time_spin_is_explained() -> None:
+    result = simloop.run(_spin_until_the_clock_moves, config=simloop.SimConfig(max_steps=5000))
+    assert result.failure is not None
+    assert result.failure.kind == "step_limit"
+    assert "steps all ran at t=0.0" in result.failure.message
+    assert "step_time=1e-6" in result.failure.message
+
+
+def test_step_time_lets_the_clock_move_between_callbacks() -> None:
+    result = run_ok(_spin_until_the_clock_moves, step_time=1e-6)
+    assert result.value == 1
+
+    async def sleeper() -> None:
+        await asyncio.sleep(10)
+
+    assert run_ok(sleeper, step_time=0.001).sim_time > 10
+
+
+def test_step_time_is_deterministic() -> None:
+    config = simloop.SimConfig(step_time=1e-6)
+    digests = {simloop.run(busy_system, seed=4, config=config).digest for _ in range(3)}
+    assert len(digests) == 1

@@ -111,6 +111,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         timer_jitter: float = 0.0,
         max_steps: int | None = None,
         max_time: float | None = None,
+        step_time: float = 0.0,
     ) -> None:
         self.choices = choices
         self.scheduler = scheduler
@@ -118,9 +119,13 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self.timer_jitter = timer_jitter
         self.max_steps = max_steps
         self.max_time = None if max_time is None else start_time + max_time
+        self.step_time = step_time
 
         self._now = start_time
         self._step = 0
+        # Steps run in a row without the clock moving, to explain a step limit.
+        self._still_steps = 0
+        self._still_since = start_time
         self._ready: deque[_Ready] = deque()
         self._batch_left = 0
         # (fire time, tie-breaker, handle, origin or None for a fresh one)
@@ -316,8 +321,12 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             return
 
         self._step += 1
+        if self._now == self._still_since:
+            self._still_steps += 1
+        else:
+            self._still_since, self._still_steps = self._now, 1
         if self.max_steps is not None and self._step > self.max_steps:
-            raise StepLimitExceeded(f"exceeded the limit of {self.max_steps} steps")
+            raise StepLimitExceeded(self._step_limit_message())
         task = _owning_task(handle)
         if task is not None:
             self._register(task)
@@ -336,6 +345,20 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             self._task_finished(task)
         for hook in self.step_hooks:
             hook()
+        if self.step_time:
+            self._advance_to(self._now + self.step_time)
+
+    def _step_limit_message(self) -> str:
+        message = f"exceeded the limit of {self.max_steps} steps"
+        if self._still_steps * 2 >= self._step and self._still_steps >= 1000:
+            message += (
+                f"; the last {self._still_steps} steps all ran at t={self._now!r} "
+                "(something keeps rescheduling itself while no time passes; if it "
+                "waits for the clock to move, a real loop would get there because "
+                "its clock advances between iterations: SimConfig(step_time=1e-6) "
+                "models that)"
+            )
+        return message
 
     def _deadlock(self) -> DeadlockError:
         blocked = [

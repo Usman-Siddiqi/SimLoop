@@ -55,6 +55,10 @@ class SimConfig:
     max_steps: int | None = 1_000_000
     max_time: float | None = None
     """Fail if simulated time would pass this many seconds."""
+    step_time: float = 0.0
+    """Simulated seconds that each callback takes. Zero freezes the clock while
+    callbacks run; a small value (``1e-6``) models a real loop's clock moving
+    between iterations, which code that spins until time passes relies on."""
     start_time: float = 0.0
     epoch: float = DEFAULT_EPOCH
     sandbox: bool = True
@@ -165,6 +169,7 @@ class Simulation:
             timer_jitter=config.timer_jitter,
             max_steps=config.max_steps,
             max_time=config.max_time,
+            step_time=config.step_time,
         )
         self.network = Network(self.loop, link=config.link, connect_timeout=config.connect_timeout)
         self.loop.network = self.network

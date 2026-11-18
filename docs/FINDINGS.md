@@ -69,9 +69,53 @@ here. Rules (see `CLAUDE.md`):
 
 ## Suspected issues
 
-None yet.
+### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
+
+- **Library:** [aiocache](https://pypi.org/project/aiocache/) 0.12.3, memory
+  backend.
+- **Reproduction:** [`findings/aiocache_stampede.py`](../findings/aiocache_stampede.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** fails on 102 of seeds 0-999 with `scheduler="fifo"` (first
+  failing seed 21) and on 98 of 1000 with the random scheduler; every random
+  failure was also found with asyncio's own order. Shrinking reduces it to
+  four callers at t=0, one of them with a zero timeout.
+- **What happens:** `cached_stampede` holds a `RedLock` while the first
+  caller computes; the others wait on the lock's release event. If the
+  holder ends without storing a value (its function raised, or it was
+  cancelled), `__aexit__` still releases and sets the event. Every waiter
+  wakes, misses the cache and calls the function itself, without taking the
+  lock again. On plain asyncio, 10 concurrent callers whose first
+  computation raises run the function 10 times, 9 of them at once, with a
+  10 s lease that never expired.
+- **Why it is only suspected:** `RedLock`'s docstring says "blocking just
+  happens for the first time" and warns against relying on it for real
+  exclusion. It describes this for an expired lease; the failure case is not
+  documented, but the behaviour follows from the same design. It defeats
+  the decorator's stated purpose ("avoids cache stampede effects") exactly
+  when a backend is failing. Whether that is a bug is the maintainers' call.
+- **Not reported.**
 
 ## False positives
+
+### aiolimiter 1.3.0: `AsyncLimiter` spins at a fixed instant
+
+- **Harness:** [`findings/aiolimiter_rate.py`](../findings/aiolimiter_rate.py)
+  with `step_time=0` (the default at the time): about 84% of seeds hit the
+  step limit under both `random` and `fifo`, with `_wake_next` timers firing
+  over and over at one simulated instant.
+- **What happened:** after leaking, the bucket level was a float residue
+  (`2.8e-16`). A full-bucket `acquire` needs that much more capacity, so
+  `_wake_next` sets a timer `2.8e-16 / rate` seconds ahead, which rounds to
+  the current time. The timer fires, no time has passed, and it rearms.
+- **Why it is not a bug:** a real loop's clock moves between iterations, so
+  the next leak clears the residue. On plain asyncio no acquire needed more
+  than 4 wakeups, even with a 15.6 ms clock tick and matching
+  `_clock_resolution` (Windows before Python 3.13). The residue also needs
+  a timer to fire at exactly its scheduled instant, which only a frozen
+  clock does. With `SimConfig(step_time=1e-6)` the harness is clean.
+- **SimLoop changes found on the way:** `step_time` models the clock moving
+  while callbacks run, and a step-limit failure now says when the last
+  steps all ran at one instant, pointing to `step_time`.
 
 ### aiohttp 3.14.5: `TypeError` in `RequestHandler.start` after a reset
 
@@ -130,6 +174,11 @@ properties and fault mixes only.
   the connection 68 times in 30 sample runs. An early "lost message" failure
   here was a SimLoop bug (segments in flight when a partition healed could
   overtake the held ones), now fixed.
+- **aiolimiter 1.3.0**, [`findings/aiolimiter_rate.py`](../findings/aiolimiter_rate.py):
+  the leaky-bucket bound (at most `max_rate + rate * window` capacity
+  granted in any window) held and no waiter was left unwoken, across 1000
+  seeds each with the `random`, `fifo` and `pct` schedulers, with mixed
+  acquire amounts and random `wait_for` timeouts (`step_time=1e-6`).
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.
