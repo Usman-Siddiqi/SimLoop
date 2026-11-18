@@ -199,6 +199,33 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** no matching issue or pull request found in searches
   of florimondmanca/aiometer on 2026-11-18. Not reported.
 
+### asyncstdlib 3.14.0: cancelling one `tee` peer silently ends the others
+
+- **Library:** [asyncstdlib](https://pypi.org/project/asyncstdlib/) 3.14.0
+  (latest release on 2026-11-18; `TeePeer` is unchanged on the upstream
+  default branch).
+- **Reproduction:** [`findings/asyncstdlib_tee_cancel.py`](../findings/asyncstdlib_tee_cancel.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** with two peers over a 6-item async generator, one peer under a
+  random `asyncio.timeout`, the other peer misses items on 719 of seeds
+  0-999 with `scheduler="fifo"` (first failing seed 0).
+- **What happens:** the most advanced peer fetches the next item by awaiting
+  the source's `__anext__` in its own task. When that peer is cancelled
+  there, the `CancelledError` is thrown into the source async generator,
+  which finishes and is closed. The other peers then get
+  `StopAsyncIteration` and their `async for` loops end normally, as if the
+  stream were complete. On plain asyncio, the peer that was not cancelled
+  receives 2 of 6 items and no error.
+- **Why it is only suspected:** a bare async generator shared between
+  consumers behaves the same way, and `tee`'s documentation ("each providing
+  the same items in the same order") does not discuss cancellation. Silent
+  truncation for consumers that were not cancelled is the part that seems
+  worth raising; a `tee` could fetch in a task no peer owns.
+- **Upstream status:** no matching issue found in searches of
+  maxfischer2781/asyncstdlib for "tee cancel", "tee cancelled" and "tee
+  timeout" on 2026-11-18 (issue #177 is a different `tee` bug, fixed). Not
+  reported.
+
 ## False positives
 
 ### aiolimiter 1.3.0: `AsyncLimiter` spins at a fixed instant
@@ -278,6 +305,10 @@ properties and fault mixes only.
   the connection 68 times in 30 sample runs. An early "lost message" failure
   here was a SimLoop bug (segments in flight when a partition healed could
   overtake the held ones), now fixed.
+- **asyncstdlib 3.14.0 (`tee` with a lock)**, [`findings/asyncstdlib_tee_cancel.py`](../findings/asyncstdlib_tee_cancel.py):
+  1 to 4 peers consumed concurrently through `lock=asyncio.Lock()` each saw
+  every item in order, 1000 seeds each with `random`, `pct` and `fifo` plus
+  1 ms jitter (`strict_cancellation=True`).
 - **aiometer 1.0.0 (meters)**, [`findings/aiometer_meters.py`](../findings/aiometer_meters.py):
   `amap` never ran more than `max_at_once` jobs, spaced starts by at least
   `1 / max_per_second` and yielded every result; a timed-out or failing
