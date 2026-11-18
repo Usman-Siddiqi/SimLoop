@@ -7,14 +7,17 @@
 **Deterministic simulation testing for Python asyncio.**
 
 SimLoop runs your asyncio code on an event loop it fully controls: simulated
-time, seeded scheduling, seeded randomness, and (soon) a simulated network
-with fault injection. You explore thousands of executions in seconds, and any
-failure replays exactly from its seed.
+time, seeded scheduling, seeded randomness, a simulated network, and seeded
+fault injection (crashes, partitions, resets, pauses, clock jumps). You
+explore thousands of executions in seconds, any failure replays exactly from
+its seed, and failures shrink to the simplest run that still shows the bug.
 
-> Status: early development. The deterministic core (loop, clock, scheduling,
-> sandboxing, invariants, seed exploration, CLI) works and is tested. The
-> simulated network, fault injection and failure minimization are next; see
-> [ROADMAP.md](ROADMAP.md).
+It has already found a previously unreported bug in a popular aio-libs
+package ([Findings](#findings)).
+
+> Status: alpha. The core, network, faults, shrinking, CLI and pytest plugin
+> work and are tested on Python 3.11 to 3.13. See [ROADMAP.md](ROADMAP.md)
+> for what is next.
 
 ## Why deterministic simulation testing
 
@@ -59,7 +62,7 @@ Exploring 1000 seeds (output from a real run):
 
 ```
 $ simloop explore examples/inventory.py:main --seeds 1000 --trace-last 0
-1000 runs, 900 passed, 100 failed in 0.48s (2088 runs/s, 772.3s simulated, 31614 steps)
+1000 runs, 900 passed, 100 failed in 0.70s (1419 runs/s, 772.3s simulated, 31614 steps)
 
 [1] invariant: always 'no stock is lost' was violated
     signature: invariant:no stock is lost
@@ -106,6 +109,65 @@ Wrapping the read-modify-write in an `asyncio.Lock` fixes it, and the same
 
 Both images are generated from real runs by
 [`scripts/render_visuals.py`](scripts/render_visuals.py).
+
+### Shrinking: the simplest run that still fails
+
+Seed 4's arrival times are random noise around the actual bug. `--shrink`
+replays edited versions of the run's recorded choices and keeps the simplest
+one that fails the same way, then saves it so it can be replayed later:
+
+```
+$ simloop explore examples/inventory.py:main --seeds 1000 --shrink --save
+...
+[invariant] invariant:no stock is lost
+shrunk in 2 runs (0.00s): 12 -> 0 choices, 25 -> 23 steps, t=0.134520s -> t=0.004000s
+saved reproduction: .simloop/failures/invariant-no-stock-is-lost-seed4.json
+replay with: simloop replay .simloop/failures/invariant-no-stock-is-lost-seed4.json
+```
+
+Zero choices means the plainest possible execution: every customer arrives
+at once, every latency is the minimum and the scheduler runs callbacks in
+asyncio's own order. The race needs no bad luck at all, which is worth
+knowing before you reach for a retry.
+
+## Example: a crash loses acknowledged writes
+
+[`examples/counter.py`](examples/counter.py) runs a counter service on a
+simulated host and crashes it at random with a Jepsen-style nemesis:
+
+```python
+net = simloop.network()
+net.add_host("counter", entry=counter_server)
+asyncio.create_task(faults.random_crashes(["counter"], every=(1, 3), downtime=(0.1, 0.5)))
+...
+reader, writer = await asyncio.open_connection("counter", 7000)  # simulated TCP
+```
+
+Every seed fails, and the shrunk run is the textbook case: the earliest
+possible crash, the shortest downtime, and a counter that starts again from
+zero after the restart.
+
+```
+$ simloop explore examples/counter.py:main --seeds 200 --shrink
+200 runs, 0 passed, 200 failed in 0.67s (300 runs/s, 479.4s simulated, 36744 steps)
+...
+shrunk in 2 runs (0.00s): 70 -> 0 choices, 197 -> 101 steps, t=2.627188s -> t=1.222000s
+```
+
+```
+        time    step  actor    event
+    0.816000      69  main     log      server says 4
+    1.000000      77  counter  crash    process crash
+    1.016000      80  main     connect  10.0.0.1:49156 -> 10.0.0.2:7000
+    1.018000      84  main     log      increment failed
+    1.100000      86  counter  restart  after 1 crash(es)
+    1.218000      89  main     connect  10.0.0.1:49157 -> 10.0.0.2:7000
+    1.222000      99  main     log      server says 1
+    1.222000     101  sim      failed   AssertionError: 5 increments acknowledged, server says 1
+```
+
+`main_durable`, which writes the count to the host's simulated disk before
+replying, passes all 200 seeds.
 
 ## Installation
 
@@ -159,6 +221,8 @@ Inside a simulation:
 | `simloop.log(msg)` | Add a line to the trace, attributed to the current task |
 | `simloop.always(pred, name)` | `pred()` must hold now and after every step |
 | `simloop.eventually(pred, name, within=s)` | `pred()` must become true within `s` simulated seconds (or by the end of the run) |
+| `simloop.network()` | The simulated network: add hosts, set links, partition and heal |
+| `simloop.current_host()` | The host the current task runs on (its `disk`, clock, name) |
 
 `SimConfig` controls a run; all of its fields are part of a reproduction:
 
@@ -170,6 +234,79 @@ Inside a simulation:
 | `max_time` | `None` | Fail if simulated time would pass this many seconds |
 | `sandbox` | `True` | Virtualize time and randomness and reject real I/O |
 | `fail_on_unhandled` | `True` | Fail when a background task or callback raises and nobody handles it |
+| `link` | `LinkConfig()` | Default link: latency 1 to 10 ms, no drops, duplicates or resets |
+| `connect_timeout` | `30.0` | How long a TCP connect keeps retrying an unreachable host |
+| `buggify` | `True` | Let `faults.buggify()` sites fire |
+
+### Simulated network
+
+Hosts get their own address (`10.0.0.N`), tasks, ports and a `disk` dict
+that survives crashes. The standard asyncio APIs work over it unchanged:
+`open_connection`, `start_server`, `create_connection`,
+`create_datagram_endpoint`, `getaddrinfo`, and plain `socket.socket` objects
+used with `loop.sock_connect` (which is how aiohttp connects). The code that
+runs before any host is added runs on the default host, `main`.
+
+```python
+net = simloop.network()
+db = net.add_host("db", entry=serve_db)        # entry reruns on every restart
+net.set_link("main", "db", latency=(0.001, 0.05), reset=0.01)
+net.partition(["db"], ["main"])                # data is held until heal()
+net.heal()
+db.crash()                                     # peers get connection resets
+db.crash(power_loss=True)                      # peers hear nothing
+db.restart()
+db.pause(2.0)                                  # a GC pause or a stalled VM
+db.clock_offset = 30.0                         # this host's time.time() is skewed
+```
+
+TCP is ordered and reliable like the real thing: a dropped segment shows up
+as a retransmission delay, a partition holds data until it heals, and connect
+to an unreachable host retries SYNs with backoff until `connect_timeout`.
+UDP datagrams can be dropped, duplicated and reordered.
+
+### Fault injection
+
+`simloop.faults` has two kinds of faults, both drawn from the run's choice
+sequence, so shrinking removes the ones that did not matter.
+
+- **BUGGIFY** (from FoundationDB): put `if faults.buggify(): ...` where
+  something unusual could happen in your own code (a short read, an early
+  timeout, a slow path). Each call site is switched on for a quarter of runs
+  and then fires with the given probability. It is always `False` outside a
+  simulation, so it can stay in production code.
+- **Nemesis tasks** (from Jepsen) attack from outside:
+  `random_partitions`, `random_crashes(power_loss=...)`, `random_pauses`,
+  `clock_jumps` and `flaky_links`. Run them as background tasks next to the
+  workload.
+
+### pytest
+
+The plugin is registered automatically when SimLoop is installed.
+
+```python
+import simloop
+
+@simloop.test(seeds=500)
+async def test_no_lost_updates():
+    ...  # ordinary asyncio code and asserts; pytest fixtures work as arguments
+```
+
+A failing test reports the seed, the shrunk run and a trace tail, and keeps
+the original traceback as the cause:
+
+```
+SimLoop: seed 0 (found after 1 run) failed with exception: AssertionError: assert 1 == 2
+  seed 0, 9 steps, t=0.000000s
+  shrunk in 2 runs (0.00s): 2 -> 0 choices, 11 -> 9 steps, t=0.005925s -> t=0.000000s
+  reproduce: pytest 'test_sim.py::test_racy' --simloop-seed 0
+```
+
+Failing runs are remembered in `.simloop/examples/` and replayed first next
+time (Hypothesis calls this the example database), so a bug keeps failing
+fast until it is fixed. Options: `--simloop-seeds N`, `--simloop-start N`,
+`--simloop-seed N` (run exactly one seed), `--simloop-no-shrink`,
+`--simloop-no-db`, `--simloop-trace-last N`.
 
 ### What counts as a failure
 
@@ -189,8 +326,11 @@ of the same bug show up as one group.
 ### CLI
 
 ```bash
-simloop run    path/to/file.py:main --seed 7 [--trace] [--scheduler fifo] [--jitter 0.001]
+simloop run     path/to/file.py:main --seed 7 [--trace] [--scheduler fifo] [--jitter 0.001]
 simloop explore module:main --seeds 10000 [--start 0] [--max-failures 5] [--time-budget 60]
+                            [--shrink] [--save] [--save-dir DIR]
+simloop replay  .simloop/failures/<file>.json [--trace] [--target module:main]
+simloop check   module:main --seeds 20 [--runs 3]   # rerun seeds, report the first divergence
 ```
 
 Targets are `module:function` or `path/to/file.py:function`. The CLI pins
@@ -206,8 +346,9 @@ ordering in the code under test is reproducible across invocations. Exit code
                      │ ready queue (batches)   ├──► PropertyChecker (always / eventually)
                      │ timer heap              │
                      ▼                         └──► Sandbox (time, random, os.urandom,
-                   Scheduler ◄── ChoiceSource            audit hook for real I/O)
-                  (fifo/random)   (seeded, recorded)
+                   Scheduler ◄── ChoiceSource ──► Network (hosts, links, TCP/UDP, DNS)
+                  (fifo/random)   (seeded,      └─► faults (buggify, nemesis tasks)
+                                   recorded)    └─► shrink / replay
 ```
 
 - **`SimEventLoop`** is written from scratch on `asyncio.AbstractEventLoop`,
@@ -233,9 +374,20 @@ ordering in the code under test is reproducible across invocations. Exit code
   just as it would stall a real one. A PEP 578 audit hook rejects real
   sockets, DNS lookups, threads and subprocesses and records the leak, so the
   run fails even if the code swallows the exception.
+- **Network.** Every simulated transport is an `asyncio.Transport` whose
+  segments are timers on the simulated clock, with per-connection ordering
+  preserved even under the `random` scheduler. Sockets the code creates
+  itself are `VirtualSocket` objects bound to the simulation.
+- **Shrinking** works on the recorded choice sequence, like Hypothesis:
+  delete chunks, zero chunks, then binary-search each value down, keeping a
+  candidate only if it fails with the same signature. Because 0 always means
+  the plainest choice, smaller sequences are simpler executions.
 - **Determinism checks.** Every trace event feeds a digest. `explore` reruns
   the first failing seed of each group with a full trace and compares
-  digests; a mismatch is reported as leaked non-determinism. The test suite
+  digests; a mismatch is reported as leaked non-determinism, together with
+  the first trace event where two runs of the seed disagree. Simulated tasks
+  and futures hash by creation order rather than address, because asyncio
+  itself iterates sets of them (`TaskGroup` cancellation, `asyncio.wait`). The test suite
   checks that the same seed gives identical traces in-process, in separate
   processes, and under different `PYTHONHASHSEED` values. Automatic garbage
   collection is paused during a run and replaced with collections every
@@ -245,11 +397,12 @@ ordering in the code under test is reproducible across invocations. Exit code
 
 These are current, known gaps rather than design limits unless stated.
 
-- **No simulated network yet.** `open_connection`, `start_server`,
-  `getaddrinfo` and friends raise `UnsupportedOperation`. This is the next
-  milestone.
-- **No fault injection or failure shrinking yet.** The recorded choice
-  sequence that shrinking will operate on is already in place.
+- **Not every network API is simulated.** TLS (`ssl=`), Unix sockets,
+  pipes, `sendfile` and blocking socket calls raise `UnsupportedOperation`.
+- **Sets of your own objects** iterate in address order, which changes from
+  run to run. SimLoop fixes this for tasks and futures but cannot for
+  arbitrary classes; `simloop check` and `explore` point at the first event
+  where it changes a run.
 - **References captured before a run are not virtualized.** `from time import
   monotonic` at import time keeps the real clock. `explore` catches the
   resulting non-determinism after the fact, but cannot prevent it.
@@ -257,8 +410,6 @@ These are current, known gaps rather than design limits unless stated.
 - `run_in_executor` and `to_thread` run the function inline (with blocking
   sleeps counted as its duration) instead of on a thread. Code that blocks a
   worker thread waiting for the event loop will deadlock.
-- `asyncio.all_tasks()` returns a set whose iteration order depends on object
-  addresses; code that iterates it may not be deterministic.
 - The `random` scheduler can, in rare cases, produce an ordering that a real
   asyncio loop never would (when the relative order of two callbacks was
   fixed by an earlier, unrelated choice). Failures found only under `random`
@@ -266,14 +417,25 @@ These are current, known gaps rather than design limits unless stated.
   orderings that real timing could cause.
 - The sandbox patches module attributes process-wide while a run is active,
   so other threads in the same process see simulated time during a run.
+- Exploration runs in one process; parallel exploration is on the roadmap.
 
 ## Findings
 
-SimLoop will be used to test real open-source async libraries. Confirmed,
-reproducible results will be listed here; the full log, including suspected
-issues and false positives, is in [docs/FINDINGS.md](docs/FINDINGS.md).
+Confirmed, reproducible results from running real open-source libraries
+under SimLoop. The full log, with seeds, settings, explanations, suspected
+issues and the libraries that ran clean, is in
+[docs/FINDINGS.md](docs/FINDINGS.md). Each script in [`findings/`](findings/)
+reproduces its result on plain asyncio and under SimLoop, and CI runs them
+against the pinned versions.
 
-No findings yet.
+| Library | Version | Bug | Status |
+| --- | --- | --- | --- |
+| [aiojobs](https://pypi.org/project/aiojobs/) | 1.4.0 | Closing a job that is still queued makes `Scheduler(limit=N)` run N+1 jobs at once ([script](findings/aiojobs_pending_close.py)) | No matching upstream issue found; not reported |
+| [async-lru](https://pypi.org/project/async-lru/) | 2.4.0 | After `cache_invalidate`, the stale call's cleanup evicts the replacement entry, so the next call starts a duplicate execution ([script](findings/async_lru_replaced_entry.py)) | Already known upstream (open PRs #797, #807); rediscovered from a generic property |
+
+Both were found by writing down a property the library promises (at most N
+jobs at once; one execution per key) and letting SimLoop search schedules,
+timings and cancellations for a counterexample.
 
 ## Project docs
 

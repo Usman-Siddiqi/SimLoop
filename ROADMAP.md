@@ -35,8 +35,9 @@ met; `docs/PROGRESS.md` has the session-by-session log.
       `NondeterminismError`
 - [x] Blocking `time.sleep` advances simulated time and is recorded in the trace
 - [ ] `datetime.now()` / `date.today()` virtualized
-- [ ] Optional determinism self-check: rerun a seed and compare digests,
-      reporting the first divergent trace event
+- [x] Optional determinism self-check: rerun a seed and compare digests,
+      reporting the first divergent trace event (`simloop check`,
+      `check_determinism`, and automatically in `explore`)
 
 ## M3: Properties, search and reporting
 - [x] `always(...)` invariants checked after every step, `eventually(...)`
@@ -45,32 +46,34 @@ met; `docs/PROGRESS.md` has the session-by-session log.
 - [x] `explore()` runs many seeds and groups failures by signature
 - [x] CLI: `simloop run` / `simloop explore` on a `module:function` target
 - [ ] Parallel exploration across processes
-- [ ] pytest plugin: `@simloop.test(seeds=...)` / marker, failing seed shown
-      in the test report, `--simloop-seed` to reproduce
+- [x] pytest plugin: `@simloop.test(seeds=...)` / marker, failing seed shown
+      in the test report, `--simloop-seed` to reproduce (plus an example
+      database that replays remembered failures first)
 
 ## M4: Simulated network
-- [ ] Named nodes with their own address; `asyncio.open_connection` /
+- [x] Named nodes with their own address; `asyncio.open_connection` /
       `start_server` work over the simulated network
-- [ ] Configurable per-link latency distribution, drops, duplication and
+- [x] Configurable per-link latency distribution, drops, duplication and
       reordering (datagram API), all seeded
-- [ ] Partitions (symmetric and asymmetric) that can be scheduled and healed
-- [ ] Simulated DNS (`getaddrinfo`)
-- [ ] Determinism tests for every network feature
+- [x] Partitions (symmetric and asymmetric) that can be scheduled and healed
+- [x] Simulated DNS (`getaddrinfo`)
+- [x] Determinism tests for every network feature
 
 ## M5: Fault injection
-- [ ] Node crash and restart (tasks of a node cancelled; node restarted from
+- [x] Node crash and restart (tasks of a node cancelled; node restarted from
       its entry point; in-memory state lost, "disk" state kept)
-- [ ] Slow operations and I/O errors (`ConnectionResetError`, timeouts) at
+- [x] Slow operations and I/O errors (`ConnectionResetError`, timeouts) at
       seeded points
-- [ ] Fault plans: declarative schedules plus seeded random faults
-- [ ] Faults appear in the trace and timeline
+- [ ] Fault plans: declarative schedules plus seeded random faults (random
+      nemesis tasks done; a declarative schedule API is still missing)
+- [x] Faults appear in the trace and text timeline (HTML timeline: M7)
 
 ## M6: Minimization
-- [ ] Replay a run exactly from its recorded choice sequence
-- [ ] Shrink a failing choice sequence (chunk deletion, value lowering toward
+- [x] Replay a run exactly from its recorded choice sequence
+- [x] Shrink a failing choice sequence (chunk deletion, value lowering toward
       zero = FIFO / no fault / minimum latency) while it still fails with the
       same signature
-- [ ] Output a minimized reproduction (seed + choice file) and its trace
+- [x] Output a minimized reproduction (seed + choice file) and its trace
 
 ## M7: Debuggability
 - [x] Readable text timeline of a run
@@ -84,11 +87,14 @@ met; `docs/PROGRESS.md` has the session-by-session log.
 - [ ] Coverage-guided or novelty-guided seed exploration (optional)
 
 ## M9: Real-world validation
-- [ ] Harnesses for popular async libraries (candidates: `aiohttp`,
+- [ ] Harnesses for popular async libraries (done so far: aiojobs,
+      async-lru, redis-py asyncio, aiorwlock; aiohttp, httpx and websockets
+      run under SimLoop but have no property harness yet) (candidates: `aiohttp`,
       `httpx`/`anyio`, `redis` asyncio client with a simulated server,
       `aiokafka`-style clients, `asyncpg`-style pools, `aiocache`,
       `tenacity`/`backoff` retry logic, `aiolimiter`)
-- [ ] Each harness documented, runnable from the CLI, and in CI (small seed budget)
+- [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed
-- [ ] README findings section lists only confirmed results
+      false positives, each with a reproduction script and seed (2 confirmed
+      and 2 clean harnesses so far)
+- [x] README findings section lists only confirmed results

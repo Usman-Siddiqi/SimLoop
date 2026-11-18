@@ -163,3 +163,19 @@ def test_crash_recovery_bug_is_found_by_nemesis() -> None:
     assert not report.ok
     assert report.groups[0].kind == "exception"
     assert "acknowledged" in report.groups[0].message
+
+
+def test_counter_example_loses_writes_only_without_disk() -> None:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
+    import counter
+
+    report = simloop.explore(counter.main, seeds=range(10))
+    assert report.failed == 10
+    shrunk = simloop.shrink(counter.main, report.groups[0].example)  # type: ignore[arg-type]
+    kinds = [e.kind for e in shrunk.shrunk.trace]
+    assert kinds.count("crash") == 1
+    assert "acknowledged" in shrunk.shrunk.failure.message  # type: ignore[union-attr]
+    assert simloop.explore(counter.main_durable, seeds=range(10)).ok
