@@ -1,4 +1,4 @@
-"""Command-line interface: ``simloop run`` and ``simloop explore``."""
+"""Command-line interface: ``simloop run``, ``explore`` and ``replay``."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ._explore import explore
+from ._explore import FailureGroup, explore
+from ._repro import Reproduction
 from ._runtime import MainFunction, RunResult, SimConfig, run
+from ._shrink import shrink
 
 _HASHSEED_ENV = "PYTHONHASHSEED"
+DEFAULT_SAVE_DIR = Path(".simloop") / "failures"
 
 
 def load_target(spec: str) -> MainFunction[Any]:
@@ -76,9 +79,28 @@ def _print_failure(result: RunResult[Any], trace_last: int) -> None:
         print(result.trace.format(last=trace_last))
 
 
+def _shrink_and_save(
+    args: argparse.Namespace, main: MainFunction[Any], failing: RunResult[Any]
+) -> RunResult[Any]:
+    """Shrink ``failing`` if asked, save a reproduction, and return the run to show."""
+    shown = failing
+    if args.shrink:
+        result = shrink(main, failing, max_runs=args.shrink_runs, time_budget=args.shrink_time)
+        print(result.summary())
+        shown = result.shrunk
+    if args.save or args.save_dir is not None:
+        repro = Reproduction.from_result(shown, target=args.target)
+        path = repro.save(Path(args.save_dir or DEFAULT_SAVE_DIR) / repro.filename())
+        print(f"saved reproduction: {path}")
+        print(f"replay with: simloop replay {path}")
+    return shown
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     main = load_target(args.target)
     result = run(main, seed=args.seed, config=_config(args))
+    if not result.ok:
+        result = _shrink_and_save(args, main, result)
     if args.trace:
         print(result.trace.format())
         print()
@@ -109,10 +131,38 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         return 0
     for group in report.groups:
         print(f"\nreproduce [{group.kind}]: {_reproduce_command(args, group.seeds[0])}")
-    first = report.groups[0].example
+    shown = [_explain_group(args, main, group) for group in report.groups]
+    first = shown[0]
     if first is not None and args.trace_last:
         print()
         _print_failure(first, args.trace_last)
+    return 1
+
+
+def _explain_group(
+    args: argparse.Namespace, main: MainFunction[Any], group: FailureGroup
+) -> RunResult[Any] | None:
+    if group.example is None or (not args.shrink and not args.save and args.save_dir is None):
+        return group.example
+    print(f"\n[{group.kind}] {group.signature}")
+    return _shrink_and_save(args, main, group.example)
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    repro = Reproduction.load(args.file)
+    target = args.target or repro.target
+    if target is None:
+        raise SystemExit("error: the reproduction names no target; pass --target")
+    result = repro.run(load_target(target))
+    if args.trace:
+        print(result.trace.format())
+        print()
+    if result.ok:
+        print(f"ok (seed {result.seed}): the saved failure no longer reproduces")
+        return 0
+    if repro.signature not in (None, result.failure and result.failure.signature):
+        print(f"note: failed differently than saved ({repro.signature})")
+    _print_failure(result, 0 if args.trace else args.trace_last)
     return 1
 
 
@@ -132,17 +182,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace-last", type=int, default=30, help="trace events to show on failure"
     )
 
-    run_parser = sub.add_parser("run", parents=[common], help="run one seed")
+    found = argparse.ArgumentParser(add_help=False)
+    found.add_argument(
+        "--shrink", action="store_true", help="minimize failures before reporting them"
+    )
+    found.add_argument("--shrink-runs", type=int, default=1000, help="run budget per failure")
+    found.add_argument("--shrink-time", type=float, default=60.0, help="wall seconds per failure")
+    found.add_argument("--save", action="store_true", help="save reproduction files")
+    found.add_argument(
+        "--save-dir", default=None, help=f"where --save writes (default {DEFAULT_SAVE_DIR})"
+    )
+
+    run_parser = sub.add_parser("run", parents=[common, found], help="run one seed")
     run_parser.add_argument("--seed", type=int, default=0)
     run_parser.add_argument("--trace", action="store_true", help="print the full trace")
     run_parser.set_defaults(handler=_cmd_run)
 
-    explore_parser = sub.add_parser("explore", parents=[common], help="run many seeds")
+    explore_parser = sub.add_parser("explore", parents=[common, found], help="run many seeds")
     explore_parser.add_argument("--seeds", type=int, default=1000, help="number of seeds")
     explore_parser.add_argument("--start", type=int, default=0, help="first seed")
     explore_parser.add_argument("--max-failures", type=int, default=None)
     explore_parser.add_argument("--time-budget", type=float, default=None, help="wall seconds")
     explore_parser.set_defaults(handler=_cmd_explore)
+
+    replay_parser = sub.add_parser("replay", help="rerun a saved reproduction file")
+    replay_parser.add_argument("file", help="JSON file written by --save")
+    replay_parser.add_argument("--target", default=None, help="override the saved target")
+    replay_parser.add_argument("--trace", action="store_true", help="print the full trace")
+    replay_parser.add_argument("--trace-last", type=int, default=30)
+    replay_parser.set_defaults(handler=_cmd_replay)
     return parser
 
 

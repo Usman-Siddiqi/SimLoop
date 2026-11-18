@@ -74,6 +74,29 @@ class SimConfig:
     def replace(self, **changes: Any) -> SimConfig:
         return dataclasses.replace(self, **changes)
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-compatible form, for saving reproductions."""
+        if not isinstance(self.scheduler, str):
+            raise ValueError("only configs with a named scheduler can be serialized")
+        data = dataclasses.asdict(self)
+        latency = self.link.latency
+        data["link"]["latency"] = list(latency) if isinstance(latency, tuple) else latency
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SimConfig:
+        known = {f.name for f in dataclasses.fields(cls)}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"unknown SimConfig fields: {', '.join(sorted(unknown))}")
+        values = dict(data)
+        if "link" in values:
+            link = dict(values["link"])
+            if isinstance(link.get("latency"), list):
+                link["latency"] = tuple(link["latency"])
+            values["link"] = LinkConfig(**link)
+        return cls(**values)
+
 
 @dataclass(frozen=True)
 class Failure:
@@ -106,6 +129,8 @@ class RunResult(Generic[T]):
     wall_time: float
     trace: Trace
     choices: list[int]
+    replayed: bool = False
+    """Whether choices came from a replayed sequence rather than the seed."""
 
     @property
     def ok(self) -> bool:
@@ -213,6 +238,7 @@ class Simulation:
             wall_time=_wall_clock() - started,
             trace=self.trace,
             choices=list(self.choices.record),
+            replayed=self.choices.replaying,
         )
 
     def _fail(self, failure: Failure) -> Failure:

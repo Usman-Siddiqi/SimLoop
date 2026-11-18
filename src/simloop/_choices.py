@@ -42,6 +42,10 @@ class ChoiceSource:
         self._pos = 0
         self.record: list[int] = []
 
+    @property
+    def replaying(self) -> bool:
+        return self._replay is not None
+
     def below(self, n: int) -> int:
         """Return an integer in ``[0, n)``. A bound of 1 records nothing."""
         if n <= 0:

@@ -5,6 +5,7 @@ from ._choices import ChoiceSource
 from ._explore import ExploreReport, FailureGroup, explore
 from ._loop import SimEventLoop
 from ._properties import Property
+from ._repro import Reproduction
 from ._runtime import (
     Failure,
     RunResult,
@@ -21,6 +22,7 @@ from ._runtime import (
     rng,
     run,
 )
+from ._shrink import ShrinkResult, shrink
 from ._trace import Trace, TraceEvent
 from .errors import (
     DeadlockError,
@@ -50,8 +52,10 @@ __all__ = [
     "NondeterminismError",
     "Property",
     "RandomScheduler",
+    "Reproduction",
     "RunResult",
     "Scheduler",
+    "ShrinkResult",
     "SimConfig",
     "SimEventLoop",
     "Simulation",
@@ -74,4 +78,5 @@ __all__ = [
     "now",
     "rng",
     "run",
+    "shrink",
 ]
