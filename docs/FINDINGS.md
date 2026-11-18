@@ -73,7 +73,24 @@ None yet.
 
 ## False positives
 
-None yet.
+### aiohttp 3.14.5: `TypeError` in `RequestHandler.start` after a reset
+
+- **Harness:** [`findings/aiohttp_pool.py`](../findings/aiohttp_pool.py) with
+  the default `scheduler="random"`: 56 of seeds 0-299 fail with
+  `TypeError: 'NoneType' object is not callable` at `web_protocol.py:666`
+  (first failing seed 5), raised in the server's per-connection task.
+- **What happened:** a request's bytes arrive and `data_received` resolves
+  the handler task's waiter; a FIN arrives at the same simulated instant and
+  `connection_lost` clears `_request_factory`. The random scheduler then ran
+  `connection_lost` before the task wakeup, although the wakeup was scheduled
+  first.
+- **Why it is not a bug:** asyncio's ready queue is FIFO, and on the selector
+  loop `data_received` and the end-of-stream read happen in different loop
+  iterations, so the wakeup always runs before `connection_lost` is called.
+  With `scheduler="fifo"` (with and without timer jitter) none of 400 seeds
+  fail, and `explore --confirm 300` reports the group as not reproduced with
+  asyncio's order. This case is why `explore` now checks feasibility by
+  default.
 
 ## Tested, nothing found
 
@@ -87,6 +104,12 @@ properties and fault mixes only.
   per segment and server process crashes every 0.3-1.5 s; the client
   recovered after faults stopped and the pool had no connections stuck in
   use. (The 2023 cancellation bug, CVE-2023-28858/28859, is fixed.)
+- **aiohttp 3.14.5**, [`findings/aiohttp_pool.py`](../findings/aiohttp_pool.py):
+  every response matched its request, the pool served `limit` concurrent
+  requests after faults stopped, and no connection stayed acquired, across
+  400 seeds with `scheduler="fifo"` (with and without 2 ms timer jitter),
+  random client timeouts and cancellations, 0.5% TCP resets per segment and
+  server crashes every 0.3-1.5 s.
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.
