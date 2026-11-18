@@ -4,10 +4,12 @@ Two mechanisms:
 
 * Patching: ``time`` functions read the simulated clock, ``time.sleep`` blocks
   simulated time, the ``random`` module's global generator is reseeded from
-  the run seed, and ``os.urandom`` (and with it ``uuid4``, ``secrets`` and
-  ``SystemRandom``) returns seeded bytes. Everything is restored on exit.
-  References captured before the run (``from time import monotonic``) are not
-  affected; that is a documented limitation.
+  the run seed, ``datetime.now()`` and ``date.today()`` read the simulated
+  wall clock (see :mod:`simloop._vdatetime`), and ``os.urandom`` (and with
+  it ``uuid4``, ``secrets`` and ``SystemRandom``) returns seeded bytes.
+  Everything is restored on exit. References captured before the run
+  (``from time import monotonic``) are not affected; that is a documented
+  limitation.
 * An audit hook (PEP 578) rejects real sockets, DNS, threads and subprocesses
   while a sandbox is active on the current thread, and records the leak so
   the run fails even if the code catches the exception.
@@ -27,6 +29,7 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import Any
 
+from . import _vdatetime
 from ._choices import derive_seed
 from ._loop import SimEventLoop
 from ._transport import virtual_socket_class
@@ -88,6 +91,7 @@ class Sandbox:
         self.leak_errors: list[NondeterminismError] = []
         self.suspended = False
         self._saved: list[tuple[object, str, object]] = []
+        self._datetime_undo: list[tuple[object, str, object]] = []
         self._saved_env: dict[str, str] = {}
         self._random_state: tuple[Any, ...] | None = None
         self._bytes = random.Random(derive_seed(seed, "os.urandom"))
@@ -205,6 +209,7 @@ class Sandbox:
         for owner, name, replacement in self._patches():
             self._saved.append((owner, name, getattr(owner, name)))
             setattr(owner, name, replacement)
+        self._datetime_undo = _vdatetime.install(self._wall)
         # A simulated network has no proxy; proxy settings inherited from the
         # real environment would send simulated traffic to an address that does
         # not exist (and make runs machine-dependent).
@@ -224,6 +229,8 @@ class Sandbox:
     ) -> None:
         _local.sandbox = None
         os.environ.update(self._saved_env)
+        _vdatetime.uninstall(self._datetime_undo)
+        self._datetime_undo = []
         for owner, name, original in reversed(self._saved):
             setattr(owner, name, original)
         self._saved.clear()

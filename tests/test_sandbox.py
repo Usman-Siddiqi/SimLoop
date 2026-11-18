@@ -159,3 +159,71 @@ def test_subprocesses_are_a_leak() -> None:
 def test_leak_hook_is_inactive_outside_simulations() -> None:
     sock = socket.socket()
     sock.close()
+
+
+def test_datetime_reads_the_simulated_wall_clock() -> None:
+    async def main() -> tuple[str, str, float, bool, bool]:
+        start = datetime.datetime.now()
+        await asyncio.sleep(3600)
+        elapsed = (datetime.datetime.now() - start).total_seconds()
+        now = datetime.datetime.now(datetime.UTC)
+        return (
+            now.isoformat(),
+            datetime.datetime.utcnow().isoformat(),
+            elapsed,
+            type(now) is datetime.datetime,
+            isinstance(now, datetime.datetime) and isinstance(now, datetime.date),
+        )
+
+    aware, naive, elapsed, exact_type, instance = run_ok(main).value or ("", "", 0.0, False, False)
+    assert aware == "2024-01-01T01:00:00+00:00"
+    assert naive == "2024-01-01T01:00:00"
+    assert elapsed == 3600
+    assert exact_type is False  # inside the run the name is the stand-in
+    assert instance
+
+
+def test_datetime_values_are_real_datetimes() -> None:
+    real = datetime.datetime
+
+    async def main() -> object:
+        built = datetime.datetime(2024, 5, 1, tzinfo=datetime.UTC)
+        return (
+            built,
+            datetime.datetime.now(),
+            datetime.date.today(),
+            datetime.datetime.fromtimestamp(0),
+        )
+
+    values = run_ok(main).value
+    assert isinstance(values, tuple)
+    assert [type(v) for v in values] == [real, real, datetime.date, real]
+    assert datetime.datetime is real
+
+
+def test_datetime_imported_by_name_is_simulated() -> None:
+    from . import support_datetime
+
+    async def main() -> tuple[str, str, str]:
+        await asyncio.sleep(86400)
+        return support_datetime.stamp()
+
+    aware, today, kind = run_ok(main).value or ("", "", "")
+    assert aware == "2024-01-02T00:00:00+00:00"
+    assert today == datetime.date.fromtimestamp(simloop.SimConfig().epoch + 86400).isoformat()
+    assert kind == "<class 'datetime.datetime'>"
+    assert vars(support_datetime)["datetime"] is datetime.datetime
+
+
+def test_datetime_follows_a_host_clock_offset() -> None:
+    async def main() -> str:
+        net = simloop.network()
+
+        async def skewed() -> str:
+            return datetime.datetime.now(datetime.UTC).isoformat()
+
+        host = net.add_host("skewed")
+        host.clock_offset = 30.0
+        return str(await host.run(skewed()))
+
+    assert run_ok(main).value == "2024-01-01T00:00:30+00:00"
