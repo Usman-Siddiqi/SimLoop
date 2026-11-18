@@ -48,7 +48,8 @@ class SimConfig:
     """Settings for a simulation run. Every field is part of a reproduction."""
 
     scheduler: str | Scheduler = "random"
-    """``"random"`` explores orderings of ready callbacks, ``"fifo"`` is asyncio's order."""
+    """``"random"`` explores orderings of ready callbacks, ``"fifo"`` is asyncio's
+    order, ``"pct"`` / ``"pct:DEPTH"`` is priority-based (PCT) exploration."""
     timer_jitter: float = 0.0
     """Upper bound (seconds) of a random, non-negative delay added to every timer."""
     max_steps: int | None = 1_000_000

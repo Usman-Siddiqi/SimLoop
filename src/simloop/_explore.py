@@ -109,7 +109,7 @@ def explore(
     of each group is rerun with a full trace, which doubles as a check that the
     failure reproduces exactly.
 
-    With ``confirm`` > 0, each group found under the ``random`` scheduler is
+    With ``confirm`` > 0, each group found under a non-FIFO scheduler is
     searched for in up to that many seeds with asyncio's own callback order
     (see :func:`confirm_feasible`), and the result is stored on the group.
     """
@@ -159,7 +159,7 @@ def explore(
             if base.scheduler == "fifo":
                 group.feasible, group.feasible_seed = True, group.seeds[0]
                 group.feasible_config = base
-            elif base.scheduler == "random":
+            else:
                 found = confirm_feasible(main, group.signature, config=base, seeds=range(confirm))
                 group.feasible = found is not None
                 if found is not None:

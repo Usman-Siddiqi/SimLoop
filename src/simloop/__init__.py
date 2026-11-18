@@ -36,7 +36,7 @@ from .errors import (
     UnsupportedOperation,
 )
 from .net import Host, LinkConfig, Network
-from .scheduling import FifoScheduler, RandomScheduler, Scheduler
+from .scheduling import FifoScheduler, PCTScheduler, RandomScheduler, Scheduler
 
 __version__ = "0.1.0.dev0"
 
@@ -53,6 +53,7 @@ __all__ = [
     "LinkConfig",
     "Network",
     "NondeterminismError",
+    "PCTScheduler",
     "Property",
     "RandomScheduler",
     "Reproduction",

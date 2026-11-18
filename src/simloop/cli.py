@@ -16,6 +16,7 @@ from ._repro import Reproduction
 from ._runtime import MainFunction, RunResult, SimConfig, run
 from ._selfcheck import check_determinism
 from ._shrink import shrink
+from .scheduling import resolve_scheduler
 
 _HASHSEED_ENV = "PYTHONHASHSEED"
 DEFAULT_SAVE_DIR = Path(".simloop") / "failures"
@@ -47,6 +48,14 @@ def load_target(spec: str) -> MainFunction[Any]:
     if not callable(target):
         raise SystemExit(f"error: {spec} is not callable")
     return target  # type: ignore[no-any-return]
+
+
+def _scheduler_name(value: str) -> str:
+    try:
+        resolve_scheduler(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return value
 
 
 def _config(args: argparse.Namespace) -> SimConfig:
@@ -188,7 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("target", help="coroutine function, as module:function or file.py:function")
-    common.add_argument("--scheduler", choices=["random", "fifo"], default="random")
+    common.add_argument(
+        "--scheduler",
+        type=_scheduler_name,
+        default="random",
+        help="random (default), fifo (asyncio's own order), pct or pct:DEPTH",
+    )
     common.add_argument("--jitter", type=float, default=0.0, help="max timer jitter (seconds)")
     common.add_argument("--max-steps", type=int, default=1_000_000, help="0 for no limit")
     common.add_argument("--max-time", type=float, default=None, help="simulated seconds")
