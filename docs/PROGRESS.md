@@ -34,7 +34,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   clean; GitHub Actions CI.
 
 ### In progress
-- Nothing half-done. CI was added this session; check its first run on GitHub.
+- Nothing half-done. CI is green on the working branch (lint, mypy, tests on 3.11 to 3.13).
 
 ### Known issues
 - `RandomScheduler.pick` is O(batch) per pick and deque deletion from the
