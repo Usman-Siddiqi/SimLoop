@@ -113,6 +113,8 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._asyncgens_shutdown_called = False
 
         self.network: Network | None = None
+        # Returns True to take a ready handle out of circulation (paused hosts).
+        self.hold_filter: Callable[[asyncio.Handle], bool] | None = None
         self.errors: list[dict[str, Any]] = []
         self.step_hooks: list[StepHook] = []
         self.advance_hooks: list[AdvanceHook] = []
@@ -189,6 +191,10 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         heapq.heappush(self._timers, (fire_at, next(self._timer_seq), handle, None))
         handle._scheduled = True  # type: ignore[attr-defined]
         return handle
+
+    def requeue(self, handle: asyncio.Handle, origin: int) -> None:
+        """Put a held handle back into the ready queue."""
+        self._ready.append(_Ready(handle, origin))
 
     def new_origin(self) -> int:
         """An origin id for callbacks that must keep their relative order."""
@@ -267,6 +273,8 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._batch_left -= 1
         handle = entry.handle
         if handle.cancelled():
+            return
+        if self.hold_filter is not None and self.hold_filter(handle):
             return
 
         self._step += 1

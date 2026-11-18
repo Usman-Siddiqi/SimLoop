@@ -85,6 +85,12 @@ class Host:
         self.silent = False
         self.disk: dict[Any, Any] = {}
         self.crashes = 0
+        self.paused = False
+        self.clock_offset = 0.0
+        """Seconds added to this host's wall clock (``time.time()``)."""
+        self.clock_drift = 0.0
+        """Relative rate error of this host's wall clock, e.g. ``1e-4`` is 100 ppm fast."""
+        self._held_handles: list[asyncio.Handle] = []
         self._context = contextvars.Context()
         self._context.run(_current_host.set, self)
         self._tasks: dict[asyncio.Task[Any], None] = {}
@@ -114,6 +120,14 @@ class Host:
     def new_context(self) -> contextvars.Context:
         return self._context.copy()
 
+    def _hold_if_paused(self, handle: asyncio.Handle) -> bool:
+        context: contextvars.Context | None = getattr(handle, "_context", None)
+        host = context.get(_current_host) if context is not None else None
+        if host is None or not host.paused:
+            return False
+        host._held_handles.append(handle)
+        return True
+
     def _adopt(self, task: asyncio.Task[Any]) -> None:
         self._tasks[task] = None
         if len(self._tasks) >= self._prune_at:
@@ -139,6 +153,8 @@ class Host:
             raise RuntimeError("the default host runs the test driver and cannot crash")
         if not self.up:
             return
+        if self.paused:
+            self.resume()
         self.up = False
         self.silent = power_loss
         self.crashes += 1
@@ -154,6 +170,39 @@ class Host:
         # dead incarnation's context.
         self._context = contextvars.Context()
         self._context.run(_current_host.set, self)
+
+    def pause(self, duration: float | None = None) -> None:
+        """Freeze the host (a GC pause, a stalled VM, SIGSTOP) without killing it.
+
+        Nothing on the host runs while paused: its timers fire late and data sent
+        to it waits. Peers carry on. With ``duration`` it resumes on its own.
+        """
+        if self.paused or not self.up:
+            return
+        self.paused = True
+        self.network._paused_hosts += 1
+        loop = self.network.loop
+        loop.hold_filter = self.network._hold_if_paused
+        self.network._record(self.name, "pause", "" if duration is None else f"for {duration!r}s")
+        if duration is not None:
+            loop._call_at_exact(loop.time() + duration, self.resume)
+
+    def resume(self) -> None:
+        if not self.paused:
+            return
+        self.paused = False
+        network = self.network
+        network._paused_hosts -= 1
+        if network._paused_hosts == 0:
+            network.loop.hold_filter = None
+        network._record(self.name, "resume", f"{len(self._held_handles)} held callbacks")
+        origin = network.loop.new_origin()
+        held, self._held_handles = self._held_handles, []
+        for handle in held:
+            network.loop.requeue(handle, origin)
+
+    def wall_time(self, simulated: float, epoch: float) -> float:
+        return epoch + simulated * (1.0 + self.clock_drift) + self.clock_offset
 
     def restart(self) -> asyncio.Task[Any] | None:
         """Bring a crashed host back and run its entry point again, if it has one."""
@@ -193,6 +242,7 @@ class Network:
         self._listeners: dict[tuple[str, int], SimServer] = {}
         self._datagrams: dict[tuple[str, int], DatagramEndpoint] = {}
         self._used_ports: dict[tuple[str, int], int] = {}
+        self._paused_hosts = 0
         self.default_host = self.add_host("main")
 
     # -- hosts ---------------------------------------------------------------------
@@ -224,6 +274,14 @@ class Network:
     def current_host(self) -> Host:
         host = _current_host.get()
         return host if host is not None and host.network is self else self.default_host
+
+    def _hold_if_paused(self, handle: asyncio.Handle) -> bool:
+        context: contextvars.Context | None = getattr(handle, "_context", None)
+        host = context.get(_current_host) if context is not None else None
+        if host is None or not host.paused:
+            return False
+        host._held_handles.append(handle)
+        return True
 
     def _adopt(self, task: asyncio.Task[Any], context: contextvars.Context | None) -> None:
         host = context.get(_current_host) if context is not None else _current_host.get()

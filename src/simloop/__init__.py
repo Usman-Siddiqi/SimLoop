@@ -1,5 +1,6 @@
 """SimLoop: deterministic simulation testing for Python asyncio."""
 
+from . import faults
 from ._choices import ChoiceSource
 from ._explore import ExploreReport, FailureGroup, explore
 from ._loop import SimEventLoop
@@ -66,6 +67,7 @@ __all__ = [
     "current_host",
     "eventually",
     "explore",
+    "faults",
     "in_simulation",
     "log",
     "network",

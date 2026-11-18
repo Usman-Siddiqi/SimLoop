@@ -108,7 +108,10 @@ class Sandbox:
     # -- patched functions ---------------------------------------------------
 
     def _wall(self) -> float:
-        return self.epoch + self.loop.time()
+        network = self.loop.network
+        if network is None:
+            return self.epoch + self.loop.time()
+        return network.current_host().wall_time(self.loop.time(), self.epoch)
 
     def _urandom(self, size: int) -> bytes:
         if size < 0:

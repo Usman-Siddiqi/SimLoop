@@ -68,6 +68,8 @@ class SimConfig:
     """Default behaviour of every link in the simulated network."""
     connect_timeout: float = 30.0
     """How long a TCP connect keeps retrying an unreachable host."""
+    buggify: bool = True
+    """Let :func:`simloop.faults.buggify` sites fire."""
 
     def replace(self, **changes: Any) -> SimConfig:
         return dataclasses.replace(self, **changes)
@@ -147,6 +149,7 @@ class Simulation:
             self.loop.step_hooks.append(self._make_gc_hook(config.gc_interval))
         self.random: random.Random = ChoiceRandom(self.choices)
         self.sandbox: Sandbox | None = None
+        self.buggify_sites: dict[tuple[str, int], bool] = {}
         self._failed_at: tuple[int, float] | None = None
 
     def _make_gc_hook(self, interval: int) -> Callable[[], None]:
