@@ -61,6 +61,43 @@ def _unsupported(name: str) -> Any:
     return method
 
 
+class _SimFuture(asyncio.Future[_T]):
+    """A future whose hash is its creation order instead of its address.
+
+    asyncio keeps tasks and futures in sets (``TaskGroup`` cancels its
+    children by iterating one, ``asyncio.wait`` returns two), so with the
+    default identity hash the iteration order, and everything downstream of
+    it, would depend on memory layout.
+    """
+
+    def __init__(self, *, loop: asyncio.AbstractEventLoop, order: int) -> None:
+        self._simloop_order = order
+        super().__init__(loop=loop)
+
+    def __hash__(self) -> int:
+        return self._simloop_order
+
+
+class _SimTask(asyncio.Task[_T]):
+    """A task with a deterministic hash; see :class:`_SimFuture`."""
+
+    def __init__(
+        self,
+        coro: Coroutine[Any, Any, _T] | Generator[Any, None, _T],
+        *,
+        loop: asyncio.AbstractEventLoop,
+        name: str,
+        context: contextvars.Context | None,
+        order: int,
+    ) -> None:
+        # Set before Task.__init__, which already hashes the task to register it.
+        self._simloop_order = order
+        super().__init__(coro, loop=loop, name=name, context=context)
+
+    def __hash__(self) -> int:
+        return self._simloop_order
+
+
 class SimEventLoop(asyncio.AbstractEventLoop):
     """Event loop with a virtual clock and a pluggable scheduling policy."""
 
@@ -103,6 +140,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         # Value: whether the task's completion has been recorded.
         self._tasks: dict[asyncio.Task[Any], bool] = {}
         self._task_counter = itertools.count(1)
+        self._hash_counter = itertools.count(1)
         self._asyncgens: weakref.WeakValueDictionary[int, AsyncGenerator[Any, Any]] = (
             weakref.WeakValueDictionary()
         )
@@ -313,7 +351,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
     # -- tasks and futures -----------------------------------------------------
 
     def create_future(self) -> asyncio.Future[Any]:
-        return asyncio.Future(loop=self)
+        return _SimFuture(loop=self, order=next(self._hash_counter))
 
     def create_task(
         self,
@@ -326,7 +364,9 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         if name is None:
             name = f"Task-{next(self._task_counter)}"
         if self._task_factory is None:
-            task: asyncio.Task[_T] = asyncio.Task(coro, loop=self, name=name, context=context)
+            task: asyncio.Task[_T] = _SimTask(
+                coro, loop=self, name=name, context=context, order=next(self._hash_counter)
+            )
         else:
             factory = cast(Callable[..., asyncio.Task[_T]], self._task_factory)
             task = factory(self, coro) if context is None else factory(self, coro, context=context)

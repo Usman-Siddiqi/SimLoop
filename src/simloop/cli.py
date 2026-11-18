@@ -14,6 +14,7 @@ from typing import Any
 from ._explore import FailureGroup, explore
 from ._repro import Reproduction
 from ._runtime import MainFunction, RunResult, SimConfig, run
+from ._selfcheck import check_determinism
 from ._shrink import shrink
 
 _HASHSEED_ENV = "PYTHONHASHSEED"
@@ -148,6 +149,18 @@ def _explain_group(
     return _shrink_and_save(args, main, group.example)
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    main = load_target(args.target)
+    config = _config(args)
+    for seed in range(args.seed, args.seed + args.seeds):
+        divergence = check_determinism(main, seed, config=config, runs=args.runs)
+        if divergence is not None:
+            print(divergence.format())
+            return 1
+    print(f"deterministic: {args.seeds} seed(s), {args.runs} runs each")
+    return 0
+
+
 def _cmd_replay(args: argparse.Namespace) -> int:
     repro = Reproduction.load(args.file)
     target = args.target or repro.target
@@ -204,6 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
     explore_parser.add_argument("--max-failures", type=int, default=None)
     explore_parser.add_argument("--time-budget", type=float, default=None, help="wall seconds")
     explore_parser.set_defaults(handler=_cmd_explore)
+
+    check_parser = sub.add_parser(
+        "check", parents=[common], help="rerun seeds and report the first divergence"
+    )
+    check_parser.add_argument("--seed", type=int, default=0, help="first seed")
+    check_parser.add_argument("--seeds", type=int, default=1, help="number of seeds")
+    check_parser.add_argument("--runs", type=int, default=3, help="runs per seed")
+    check_parser.set_defaults(handler=_cmd_check)
 
     replay_parser = sub.add_parser("replay", help="rerun a saved reproduction file")
     replay_parser.add_argument("file", help="JSON file written by --save")

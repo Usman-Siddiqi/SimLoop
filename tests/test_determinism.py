@@ -104,7 +104,9 @@ def test_explore_flags_code_that_leaks_real_time() -> None:
     report = simloop.explore(leaky, seeds=range(3))
     assert len(report.groups) == 1
     assert report.groups[0].reproducible is False
+    assert report.groups[0].divergence is not None
     assert "leaking non-determinism" in report.summary()
+    assert "diverged at trace event" in report.summary()
 
 
 def test_explore_confirms_reproducible_failures() -> None:
@@ -115,3 +117,73 @@ def test_explore_confirms_reproducible_failures() -> None:
     report = simloop.explore(flaky, seeds=range(20))
     assert report.groups
     assert all(group.reproducible for group in report.groups)
+
+
+async def _taskgroup_abort() -> None:
+    async def child(n: int) -> None:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            simloop.log(f"child {n} cancelled")
+            raise
+
+    async def failing() -> None:
+        await asyncio.sleep(1)
+        raise ValueError("boom")
+
+    async def group() -> None:
+        async with asyncio.TaskGroup() as tg:
+            for n in range(20):
+                tg.create_task(child(n))
+            tg.create_task(failing())
+
+    with pytest.raises(ExceptionGroup):
+        await group()
+    done, pending = await asyncio.wait(
+        [asyncio.ensure_future(asyncio.sleep(n % 3)) for n in range(10)], timeout=1.5
+    )
+    simloop.log(f"wait: {len(done)} done, {len(pending)} pending")
+    for future in pending:
+        future.cancel()
+        await asyncio.sleep(0)
+        simloop.log("cancelled one")
+
+
+def test_task_sets_iterate_in_a_reproducible_order() -> None:
+    # TaskGroup cancels its children by iterating a set and asyncio.wait
+    # returns sets; with identity hashes the order would follow memory layout.
+    assert simloop.check_determinism(_taskgroup_abort, seed=3, runs=5) is None
+    first = simloop.run(_taskgroup_abort, seed=3)
+    cancelled = [e.detail for e in first.trace if e.detail.startswith("child")]
+    assert len(cancelled) == 20
+
+
+_leaked_state = {"runs": 0}
+
+
+async def _leaky() -> None:
+    await asyncio.sleep(1)
+    _leaked_state["runs"] += 1
+    simloop.log(f"run number {_leaked_state['runs']}")
+    await asyncio.sleep(1)
+
+
+def test_check_determinism_reports_the_first_divergent_event() -> None:
+    divergence = simloop.check_determinism(_leaky, seed=0)
+    assert divergence is not None
+    assert divergence.expected is not None
+    assert divergence.actual is not None
+    assert divergence.expected.detail == "run number 1"
+    assert divergence.actual.detail == "run number 2"
+    text = divergence.format()
+    assert "diverged at trace event" in text
+    assert "run 1:" in text
+    assert "run 2:" in text
+
+
+def test_cli_check_command(capsys: pytest.CaptureFixture[str]) -> None:
+    from simloop import cli
+
+    target = f"{Path(__file__).resolve().parent / 'workloads.py'}:busy_system"
+    assert cli.main(["check", target, "--seeds", "2"]) == 0
+    assert "deterministic: 2 seed(s)" in capsys.readouterr().out

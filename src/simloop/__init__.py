@@ -22,6 +22,7 @@ from ._runtime import (
     rng,
     run,
 )
+from ._selfcheck import Divergence, check_determinism
 from ._shrink import ShrinkResult, shrink
 from ._testing import SimulationFailed, test
 from ._trace import Trace, TraceEvent
@@ -42,6 +43,7 @@ __version__ = "0.1.0.dev0"
 __all__ = [
     "ChoiceSource",
     "DeadlockError",
+    "Divergence",
     "ExploreReport",
     "Failure",
     "FailureGroup",
@@ -69,6 +71,7 @@ __all__ = [
     "UnsupportedOperation",
     "__version__",
     "always",
+    "check_determinism",
     "current",
     "current_host",
     "eventually",

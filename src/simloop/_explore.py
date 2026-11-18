@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._runtime import MainFunction, RunResult, SimConfig, run
+from ._selfcheck import Divergence, check_determinism
 
 _wall_clock = time.perf_counter
 
@@ -24,6 +25,8 @@ class FailureGroup:
     """Traced rerun of the first failing seed."""
     reproducible: bool = True
     """Whether the traced rerun matched the original run's trace digest."""
+    divergence: Divergence | None = None
+    """For an unreproducible group, where repeated runs of its seed first differ."""
 
 
 @dataclass
@@ -68,6 +71,9 @@ class ExploreReport:
                     "    WARNING: rerunning the first seed produced a different trace; "
                     "the code under test is leaking non-determinism"
                 )
+                if group.divergence is not None:
+                    detail = group.divergence.format().replace("\n", "\n    ")
+                    lines.append(f"    {detail}")
         return "\n".join(lines)
 
 
@@ -124,6 +130,8 @@ def explore(
         example = run(main, seed=group.seeds[0], config=base.replace(keep_trace=True))
         group.example = example
         group.reproducible = example.digest == digests[group.signature]
+        if not group.reproducible:
+            group.divergence = check_determinism(main, group.seeds[0], config=base, runs=4)
 
     return ExploreReport(
         runs=runs,
