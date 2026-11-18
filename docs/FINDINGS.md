@@ -179,6 +179,16 @@ properties and fault mixes only.
   granted in any window) held and no waiter was left unwoken, across 1000
   seeds each with the `random`, `fifo` and `pct` schedulers, with mixed
   acquire amounts and random `wait_for` timeouts (`step_time=1e-6`).
+- **anyio 4.16.0 (asyncio backend)**, [`findings/anyio_primitives.py`](../findings/anyio_primitives.py):
+  memory object streams delivered every successfully sent item exactly once
+  and in order per producer (buffer sizes 0, 1, 3; two consumers);
+  `CapacityLimiter` never exceeded its total, woke waiters when the total
+  was raised and left nothing borrowed; `Semaphore` and `Lock` kept their
+  bounds in both `fast_acquire` modes. 1000 seeds each with the `random`,
+  `fifo` and `pct` schedulers, with random `move_on_after` cancellations.
+  The first attempt flagged every failing seed as unreproducible: anyio
+  keeps child cancel scopes in a set, which iterated in address order.
+  SimLoop now hashes such classes by creation order (`stable_hash`).
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.

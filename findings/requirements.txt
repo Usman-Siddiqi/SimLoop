@@ -9,3 +9,4 @@ httpcore==1.0.9
 websockets==17.4
 aiolimiter==1.3.0
 aiocache==0.12.3
+anyio==4.16.0
