@@ -189,6 +189,15 @@ properties and fault mixes only.
   The first attempt flagged every failing seed as unreproducible: anyio
   keeps child cancel scopes in a set, which iterated in address order.
   SimLoop now hashes such classes by creation order (`stable_hash`).
+- **uvicorn 0.54.0 + Starlette 1.10.0 + httpx 0.28.1** (h11),
+  [`findings/uvicorn_starlette.py`](../findings/uvicorn_starlette.py), all
+  running unmodified on the simulated network: every response carried its
+  own request's id and body across keep-alive reuse, client timeouts and a
+  fault schedule (server crashes and restarts, 2% injected resets,
+  partitions), and a fresh request succeeded after the faults; running
+  handlers never exceeded `limit_concurrency`; a graceful shutdown in the
+  middle of traffic answered every request whose handler had started.
+  300 seeds each with `random`, `pct` and `fifo` plus 2 ms jitter.
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.
