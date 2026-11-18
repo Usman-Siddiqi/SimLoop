@@ -279,7 +279,7 @@ UDP datagrams can be dropped, duplicated and reordered.
 
 ### Fault injection
 
-`simloop.faults` has two kinds of faults, both drawn from the run's choice
+`simloop.faults` has three kinds of faults, all drawn from the run's choice
 sequence, so shrinking removes the ones that did not matter.
 
 - **BUGGIFY** (from FoundationDB): put `if faults.buggify(): ...` where
@@ -291,6 +291,26 @@ sequence, so shrinking removes the ones that did not matter.
   `random_partitions`, `random_crashes(power_loss=...)`, `random_pauses`,
   `clock_jumps` and `flaky_links`. Run them as background tasks next to the
   workload.
+- **Schedules** say what goes wrong and when. Times, durations, periods and
+  targets can be fixed or random; random ones are drawn from the seed, and
+  shrinking moves them to the low end of their range, so a minimized failure
+  shows the earliest, shortest fault that still breaks the system.
+
+```python
+from simloop import faults
+
+faults.schedule(
+    faults.at(1.0, faults.crash("db1")),                              # stays down
+    faults.between(2.0, 4.0, faults.partition(["db1"], ["db2", "db3"])),
+    faults.during((5, 10), (0.5, 2), faults.pause(faults.any_of("db1", "db2"))),
+    faults.every((1, 3), faults.degrade_link("app", "db1", drop=0.3), duration=0.5, until=60),
+).start()
+```
+
+  Faults: `crash` (undone by a restart), `restart`, `pause`, `partition`,
+  `partition_one_way`, `isolate`, `degrade_link`, `clock_jump` and `call` for
+  your own. `during` and `between` undo the fault at the end of the window;
+  overlapping partitions compose, so healing one leaves the other in place.
 
 ### Schedulers and feasibility
 

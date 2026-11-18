@@ -20,6 +20,7 @@ import ipaddress
 import itertools
 import socket
 import weakref
+from collections import Counter
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -242,7 +243,8 @@ class Network:
         self._links: dict[tuple[str, str], LinkConfig] = {}
         self._hosts: dict[str, Host] = {}
         self._by_ip: dict[str, Host] = {}
-        self._blocked: set[tuple[str, str]] = set()
+        # Each partition holds a reference, so overlapping ones compose.
+        self._blocked: Counter[tuple[str, str]] = Counter()
         self._held: dict[Callable[[], None], None] = {}
         self._listeners: dict[tuple[str, int], SimServer] = {}
         self._datagrams: dict[tuple[str, int], DatagramEndpoint] = {}
@@ -327,13 +329,13 @@ class Network:
         for x in _names(a):
             for y in _names(b):
                 if x != y:
-                    self._blocked.add((x, y))
-                    self._blocked.add((y, x))
+                    self._blocked[(x, y)] += 1
+                    self._blocked[(y, x)] += 1
         self._record("network", "partition", f"{sorted(_names(a))} | {sorted(_names(b))}")
 
     def block(self, src: str | Host, dst: str | Host) -> None:
         """Drop traffic from ``src`` to ``dst`` only (an asymmetric partition)."""
-        self._blocked.add((_name(src), _name(dst)))
+        self._blocked[(_name(src), _name(dst))] += 1
         self._record("network", "partition", f"{_name(src)} -> {_name(dst)}")
 
     def isolate(self, host: str | Host) -> None:
@@ -348,12 +350,31 @@ class Network:
         else:
             x = _name(a)
             ys = None if b is None else _name(b)
-            self._blocked = {
-                (s, d)
-                for s, d in self._blocked
-                if not ((s == x or d == x) and (ys is None or s == ys or d == ys))
-            }
+            for s, d in list(self._blocked):
+                if (s == x or d == x) and (ys is None or s == ys or d == ys):
+                    del self._blocked[(s, d)]
         self._record("network", "heal", "all" if a is None else f"{_name(a)}")
+        self._flush_held()
+
+    def release(self, links: Iterable[tuple[str | Host, str | Host]]) -> None:
+        """Undo one :meth:`partition` or :meth:`block` of each ``(src, dst)`` link.
+
+        Unlike :meth:`heal`, a link that another partition also cut stays cut.
+        """
+        released = []
+        for a, b in links:
+            key = (_name(a), _name(b))
+            if self._blocked[key] <= 1:
+                self._blocked.pop(key, None)
+            else:
+                self._blocked[key] -= 1
+            released.append(f"{key[0]}->{key[1]}")
+        self._record("network", "heal", ", ".join(released))
+        self._flush_held()
+
+    def _flush_held(self) -> None:
+        # Held data re-checks its link when replayed, so flushing after a
+        # partial heal is safe.
         held, self._held = self._held, {}
         for flush in held:
             flush()

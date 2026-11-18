@@ -12,6 +12,10 @@ background tasks next to the workload::
     asyncio.create_task(faults.random_partitions(every=(1, 5)))
     asyncio.create_task(faults.random_crashes(["db1", "db2"], every=(5, 20)))
 
+For a fixed or partly random plan, use a declarative schedule instead
+(:func:`schedule` with :func:`at`, :func:`during`, :func:`between` and
+:func:`every`; see :mod:`simloop._schedule`).
+
 Every decision is drawn from the run's choice source, so shrinking a failure
 tends to remove faults that did not matter.
 """
@@ -23,7 +27,58 @@ import sys
 from collections.abc import Sequence
 
 from ._runtime import current, in_simulation
+from ._schedule import (
+    AnyOf,
+    Fault,
+    Schedule,
+    Step,
+    Undo,
+    any_of,
+    at,
+    between,
+    call,
+    clock_jump,
+    crash,
+    degrade_link,
+    during,
+    every,
+    isolate,
+    partition,
+    partition_one_way,
+    pause,
+    restart,
+    schedule,
+)
 from .net import Host
+
+__all__ = [
+    "AnyOf",
+    "Fault",
+    "Schedule",
+    "Step",
+    "Undo",
+    "any_of",
+    "at",
+    "between",
+    "buggify",
+    "call",
+    "clock_jump",
+    "clock_jumps",
+    "crash",
+    "degrade_link",
+    "during",
+    "every",
+    "flaky_links",
+    "isolate",
+    "partition",
+    "partition_one_way",
+    "pause",
+    "random_crashes",
+    "random_partitions",
+    "random_pauses",
+    "restart",
+    "schedule",
+]
 
 Range = float | tuple[float, float]
 
