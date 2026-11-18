@@ -228,10 +228,11 @@ Inside a simulation:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `scheduler` | `"random"` | `"random"` explores orderings of ready callbacks; `"fifo"` is exactly asyncio's order |
+| `scheduler` | `"random"` | `"random"` explores orderings of ready callbacks; `"fifo"` is exactly asyncio's order; `"pct"` / `"pct:DEPTH"` is priority-based exploration (below) |
 | `timer_jitter` | `0.0` | Random extra delay (seconds, never negative) added to every timer |
 | `max_steps` | `1_000_000` | Fail if the run executes more callbacks than this (livelock guard) |
 | `max_time` | `None` | Fail if simulated time would pass this many seconds |
+| `step_time` | `0.0` | Simulated seconds each callback takes; `1e-6` models a real loop's clock moving between iterations |
 | `sandbox` | `True` | Virtualize time and randomness and reject real I/O |
 | `fail_on_unhandled` | `True` | Fail when a background task or callback raises and nobody handles it |
 | `link` | `LinkConfig()` | Default link: latency 1 to 10 ms, no drops, duplicates or resets |
@@ -280,6 +281,34 @@ sequence, so shrinking removes the ones that did not matter.
   `clock_jumps` and `flaky_links`. Run them as background tasks next to the
   workload.
 
+### Schedulers and feasibility
+
+- `random` (the default) picks any ready callback, keeping callbacks from
+  the same origin in order. It finds races fast, but can occasionally build
+  an order that a real loop never would.
+- `fifo` is exactly asyncio's order. Add `timer_jitter` to explore timings
+  instead of orderings; everything it finds can happen on a real loop.
+- `pct` implements Probabilistic Concurrency Testing (Burckhardt et al.,
+  ASPLOS 2010): each task gets a random priority that persists across
+  steps, and `DEPTH - 1` random points demote the running task. It finds
+  bugs that need one task to keep losing races for many rounds, which
+  uniform random choice almost never produces.
+
+When `explore` finds a failure under a scheduler other than `fifo`, it
+searches for the same failure with `fifo` (with and without timer jitter)
+and reports whether it reproduced. A failure marked "NOT reproduced with
+asyncio's order" deserves an argument before anyone calls it a bug
+(`--confirm N` sets the search budget; 0 skips it).
+
+### Parallel exploration
+
+`explore(..., workers=N)`, `simloop explore -j N` and
+`@simloop.test(workers=N)` (or `--simloop-workers N`) run seeds in N
+forked worker processes (0 means one per CPU). Results are consumed in seed
+order, so the report, including where `max_failures` stops, is identical to
+a sequential run. Throughput scales with cores: 400 seeds of a busy
+workload take 1.9 s on one worker and 0.48 s on four.
+
 ### pytest
 
 The plugin is registered automatically when SimLoop is installed.
@@ -306,7 +335,8 @@ Failing runs are remembered in `.simloop/examples/` and replayed first next
 time (Hypothesis calls this the example database), so a bug keeps failing
 fast until it is fixed. Options: `--simloop-seeds N`, `--simloop-start N`,
 `--simloop-seed N` (run exactly one seed), `--simloop-no-shrink`,
-`--simloop-no-db`, `--simloop-trace-last N`.
+`--simloop-no-db`, `--simloop-workers N`, `--simloop-confirm N`,
+`--simloop-trace-last N`.
 
 ### What counts as a failure
 
@@ -328,6 +358,7 @@ of the same bug show up as one group.
 ```bash
 simloop run     path/to/file.py:main --seed 7 [--trace] [--scheduler fifo] [--jitter 0.001]
 simloop explore module:main --seeds 10000 [--start 0] [--max-failures 5] [--time-budget 60]
+                            [-j 4] [--scheduler pct] [--confirm 200]
                             [--shrink] [--save] [--save-dir DIR]
 simloop replay  .simloop/failures/<file>.json [--trace] [--target module:main]
 simloop check   module:main --seeds 20 [--runs 3]   # rerun seeds, report the first divergence
@@ -368,8 +399,8 @@ ordering in the code under test is reproducible across invocations. Exit code
   step in their registration order, because asyncio guarantees that order and
   real code depends on it.
 - **`Sandbox`** patches `time.time`/`monotonic`/`perf_counter`/`sleep` (and
-  friends) to read the simulated clock, reseeds the global `random` generator,
-  and replaces `os.urandom` (which covers `uuid4`, `secrets` and
+  friends) and `datetime.now`/`date.today` to read the simulated clock,
+  reseeds the global `random` generator, and replaces `os.urandom` (which covers `uuid4`, `secrets` and
   `SystemRandom`). A blocking `time.sleep` stalls the whole simulated loop,
   just as it would stall a real one. A PEP 578 audit hook rejects real
   sockets, DNS lookups, threads and subprocesses and records the leak, so the
@@ -406,7 +437,11 @@ These are current, known gaps rather than design limits unless stated.
 - **References captured before a run are not virtualized.** `from time import
   monotonic` at import time keeps the real clock. `explore` catches the
   resulting non-determinism after the fact, but cannot prevent it.
-- **`datetime.now()` is not virtualized yet.**
+- **`datetime.now()`, `utcnow()` and `date.today()` are simulated** by
+  swapping stand-in classes into `datetime` and into modules that imported
+  the classes by name. A class reference stored anywhere else (a dict, a
+  default argument) keeps the real clock. Local-time conversions use the
+  machine's time zone, as `time.localtime` does.
 - `run_in_executor` and `to_thread` run the function inline (with blocking
   sleeps counted as its duration) instead of on a thread. Code that blocks a
   worker thread waiting for the event loop will deadlock.
@@ -417,7 +452,12 @@ These are current, known gaps rather than design limits unless stated.
   orderings that real timing could cause.
 - The sandbox patches module attributes process-wide while a run is active,
   so other threads in the same process see simulated time during a run.
-- Exploration runs in one process; parallel exploration is on the roadmap.
+- Simulated time stands still while callbacks run unless `step_time` is
+  set. Code that spins until the clock moves then hits the step limit; the
+  failure message says so when the last steps all ran at one instant.
+- Parallel exploration forks worker processes. Where `fork` is not available
+  (Windows), the target must be a module-level function so it can be
+  pickled.
 
 ## Findings
 

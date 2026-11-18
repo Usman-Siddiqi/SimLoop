@@ -2,6 +2,56 @@
 
 Newest session first. Each entry: done, in progress, known issues, next steps.
 
+## Session 3 (2026-11-18): fidelity, PCT, parallel runs, more findings
+
+### Done
+- **Network fidelity fixes found while hunting** (each with a regression
+  test that fails on the old code): an incoming RST reports
+  `connection_lost` from a later callback, like asyncio's `_force_close`;
+  data held by a partition is replayed in order after a heal, with segments
+  in flight queued behind it; simulated sockets have virtual file
+  descriptors, and `select.select`/`select.poll` answer zero-timeout
+  readiness checks (httpcore uses them to expire idle connections).
+- **Feasibility confirmation**: `explore(confirm=N)` (default 200 in the CLI
+  and pytest) re-searches each failure found under a non-FIFO scheduler with
+  `fifo` plus timer jitter and labels it. This is what separated the aiohttp
+  false positive from real bugs.
+- **PCT scheduler** (`scheduler="pct"` / `"pct:DEPTH"`, `PCTScheduler`):
+  per-task priorities with `DEPTH - 1` demotion points drawn from the
+  choice source; all-zero choices are FIFO, so shrinking still works. Finds
+  a "loses every round" ordering in most seeds where `random` finds none.
+- **Parallel exploration**: `workers=` / `-j` / `--simloop-workers`; forked
+  workers (closures work), outcomes consumed in seed order so the report
+  matches a sequential one. 4x on 4 cores.
+- **`datetime.now()`, `utcnow()`, `date.today()` simulated** via stand-in
+  classes, including modules that did `from datetime import datetime`.
+- **`SimConfig.step_time`** and a step-limit message that detects spinning
+  at one instant (from the aiolimiter false positive).
+- **Findings**: aiocache 0.12.3 `cached_stampede` lets every waiter compute
+  after a failed first call (suspected issue; reproduces on plain asyncio;
+  not reported). aiolimiter 1.3.0 zero-time spin (false positive: frozen
+  clock). aiolimiter, aiohttp, httpx/httpcore and websockets clean under
+  their properties; redis-py rerun clean after the transport fixes.
+- 197 tests on 3.11 to 3.13.
+
+### In progress
+- Nothing half-done.
+
+### Known issues
+- Sets of user objects with identity hashes still iterate in address order.
+- `RandomScheduler.pick` and `PCTScheduler.pick` are O(batch).
+- TLS and Unix sockets are not simulated.
+- On platforms without `fork`, parallel exploration needs a picklable target.
+
+### Next steps
+1. HTML timeline (per-task lanes, network messages, faults) and an animated
+   GIF generated from real runs (M7).
+2. Declarative fault schedules (M5).
+3. More M9 harnesses: tenacity/backoff retry timing, anyio primitives
+   (CapacityLimiter, memory streams) under cancellation, aiohttp/httpx with
+   richer properties.
+4. Coverage- or novelty-guided seed exploration (M8, optional).
+
 ## Session 2 (2026-11-18): network, faults, shrinking, pytest, first findings
 
 ### Done
