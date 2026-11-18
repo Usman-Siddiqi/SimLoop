@@ -25,6 +25,7 @@ from ._runtime import (
 )
 from ._selfcheck import Divergence, check_determinism
 from ._shrink import ShrinkResult, shrink
+from ._stablehash import stable_hash
 from ._testing import SimulationFailed, test
 from ._trace import Trace, TraceEvent
 from .errors import (
@@ -89,5 +90,6 @@ __all__ = [
     "run",
     "save_html",
     "shrink",
+    "stable_hash",
     "test",
 ]

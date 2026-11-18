@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Generic, TypeVar
 
+from . import _stablehash
 from ._choices import ChoiceRandom, ChoiceSource
 from ._loop import _INTERNAL_DIRS, SimEventLoop
 from ._properties import Predicate, Property, PropertyChecker
@@ -267,11 +268,13 @@ class Simulation:
             gc.disable()
         sandbox = Sandbox(self.loop, self.seed, self.config.epoch) if self.config.sandbox else None
         _local.simulation = self
+        _stablehash.begin_run()
         try:
             with sandbox if sandbox is not None else contextlib.nullcontext():
                 self.sandbox = sandbox
                 yield sandbox
         finally:
+            _stablehash.end_run()
             _local.simulation = None
             self.loop.close()
             if gc_was_enabled:

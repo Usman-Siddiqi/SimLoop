@@ -462,9 +462,11 @@ These are current, known gaps rather than design limits unless stated.
 - **Not every network API is simulated.** TLS (`ssl=`), Unix sockets,
   pipes, `sendfile` and blocking socket calls raise `UnsupportedOperation`.
 - **Sets of your own objects** iterate in address order, which changes from
-  run to run. SimLoop fixes this for tasks and futures but cannot for
-  arbitrary classes; `simloop check` and `explore` point at the first event
-  where it changes a run.
+  run to run. SimLoop fixes this for tasks, futures and anyio's cancel scopes;
+  decorate your own identity-hashed classes with `@simloop.stable_hash` to
+  make them hash by creation order inside simulations (outside, nothing
+  changes). `simloop check` and `explore` point at the first event where an
+  unpatched set changes a run.
 - **References captured before a run are not virtualized.** `from time import
   monotonic` at import time keeps the real clock. `explore` catches the
   resulting non-determinism after the fact, but cannot prevent it.
