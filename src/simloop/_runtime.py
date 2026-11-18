@@ -187,6 +187,7 @@ class Simulation:
         return collect
 
     def execute(self, main: MainFunction[T]) -> RunResult[T]:
+        __tracebackhide__ = True  # keep pytest reports focused on user code
         if not callable(main):
             raise TypeError(
                 "simloop needs a coroutine *function* so every run gets a fresh coroutine; "

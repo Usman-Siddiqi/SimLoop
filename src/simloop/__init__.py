@@ -23,6 +23,7 @@ from ._runtime import (
     run,
 )
 from ._shrink import ShrinkResult, shrink
+from ._testing import SimulationFailed, test
 from ._trace import Trace, TraceEvent
 from .errors import (
     DeadlockError,
@@ -60,6 +61,7 @@ __all__ = [
     "SimEventLoop",
     "Simulation",
     "SimulationError",
+    "SimulationFailed",
     "StepLimitExceeded",
     "TimeLimitExceeded",
     "Trace",
@@ -79,4 +81,5 @@ __all__ = [
     "rng",
     "run",
     "shrink",
+    "test",
 ]

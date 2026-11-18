@@ -409,6 +409,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             sys.set_asyncgen_hooks(*old_hooks)
 
     def run_until_complete(self, future: asyncio.Future[_T] | Coroutine[Any, Any, _T]) -> _T:  # type: ignore[override]
+        __tracebackhide__ = True
         self._check_closed()
         self._check_not_running()
         new_task = not asyncio.isfuture(future)
