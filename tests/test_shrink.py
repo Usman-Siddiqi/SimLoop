@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -162,3 +163,25 @@ def test_cli_shrink_save_and_replay(
 
     assert cli.main(["replay", str(saved[0]), "--target", f"{INVENTORY}:main_fixed"]) == 0
     assert "no longer reproduces" in capsys.readouterr().out
+
+
+def test_candidates_that_spin_do_not_eat_the_budget() -> None:
+    # Zeroing the tail of this run's choices makes every sleep 0 and the
+    # exit condition false: a spin at one instant until the step limit.
+    async def main() -> None:
+        rng = simloop.rng()
+        while True:
+            await asyncio.sleep(rng.uniform(0, 0.01))
+            if rng.random() > 0.999:
+                raise AssertionError("gave up")
+
+    failing = next(
+        r for r in (simloop.run(main, seed=s) for s in range(50)) if r.failure is not None
+    )
+    assert failing.failure is not None
+    assert failing.failure.kind == "exception"
+    started = time.perf_counter()
+    result = simloop.shrink(main, failing, max_runs=30)
+    assert time.perf_counter() - started < 15
+    assert result.shrunk.failure is not None
+    assert result.shrunk.failure.signature == failing.failure.signature

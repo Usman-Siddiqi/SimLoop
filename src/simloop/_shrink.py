@@ -62,6 +62,10 @@ def _key(choices: list[int]) -> tuple[int, list[int]]:
     return (len(choices), choices)
 
 
+CANDIDATE_MIN_STEPS = 10_000
+"""Smallest step budget a shrink candidate gets (see ``_Shrinker``)."""
+
+
 class _Shrinker:
     def __init__(
         self,
@@ -77,6 +81,14 @@ class _Shrinker:
         self.seed = failing.seed
         self.signature = failing.failure.signature
         self.config = config.replace(keep_trace=False)
+        if failing.failure.kind != "step_limit":
+            # A candidate that runs far longer than the failure it should
+            # simplify cannot be the simpler run we want, and a zeroed choice
+            # tail easily turns a retry loop into a zero-time spin that would
+            # otherwise burn the whole step budget on every attempt.
+            cap = max(10 * failing.steps, CANDIDATE_MIN_STEPS)
+            if config.max_steps is None or cap < config.max_steps:
+                self.config = self.config.replace(max_steps=cap)
         self.best = normalize(failing.choices)
         self.max_runs = max_runs
         self.deadline = deadline
