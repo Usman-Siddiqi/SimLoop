@@ -108,6 +108,9 @@ class Sandbox:
             raise ValueError("sleep length must be non-negative")
         self.loop.block_for(seconds)
 
+    def _thread_start(self, *args: Any, **kwargs: Any) -> None:
+        self.report_leak("threading.Thread.start", ())
+
     def _random_seed(self, a: Any = None, version: int = 2) -> None:
         if a is None:
             a = derive_seed(self.seed, "random.seed")
@@ -155,6 +158,8 @@ class Sandbox:
             (os, "urandom", self._urandom),
             (random, "_urandom", self._urandom),
             (random, "seed", self._random_seed),
+            # Python 3.11 has no audit event for starting a thread.
+            (threading.Thread, "start", self._thread_start),
         ]
 
     # -- context manager -------------------------------------------------------
