@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -254,3 +255,26 @@ def test_leftover_tasks_are_cancelled_after_main_returns() -> None:
 
     assert _run(main).ok
     assert cleaned == ["server stopped"]
+
+
+def test_tasks_cleanup_cannot_finish_are_closed_inside_the_run() -> None:
+    seen: list[float] = []
+
+    async def stubborn() -> None:
+        try:
+            while True:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.Event().wait()
+        finally:
+            # Outside the simulation this would raise instead.
+            seen.append(simloop.now())
+
+    async def main() -> None:
+        asyncio.get_running_loop().create_task(stubborn())
+        await asyncio.sleep(1.0)
+        raise ValueError("boom")
+
+    result = simloop.run(main)
+    assert result.failure is not None
+    assert result.failure.kind == "exception"
+    assert seen == [1.0]

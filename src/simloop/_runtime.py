@@ -319,6 +319,7 @@ class Simulation:
             for task in loop.tasks:
                 if not task.done():
                     task._log_destroy_pending = False  # type: ignore[attr-defined]
+                    _close_abandoned(task)
         return None
 
     def _collect_unhandled(self, main_task: asyncio.Task[Any]) -> list[Failure]:
@@ -459,6 +460,26 @@ def _classify(exc: BaseException) -> Failure:
         return Failure("nondeterminism", str(exc), "nondeterminism", exc)
     message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
     return Failure("exception", message, f"exception:{type(exc).__name__}@{_location(exc)}", exc)
+
+
+def _close_abandoned(task: asyncio.Task[Any]) -> None:
+    """Close a task that cleanup could not finish, while the simulation is active.
+
+    Otherwise the garbage collector closes its coroutine later, outside the
+    simulation, and its ``finally`` blocks and ``async with`` exits run
+    against a closed loop and print "Exception ignored" noise into whatever
+    runs next.
+    """
+    coro = task.get_coro()
+    close = getattr(coro, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        pass
 
 
 def _location(exc: BaseException) -> str:
