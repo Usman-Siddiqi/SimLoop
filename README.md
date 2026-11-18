@@ -519,10 +519,12 @@ against the pinned versions.
 | CPython asyncio | 3.11.x | Cancelling a task while `wait_for` is cancelling its inner task after a timeout returns early; `async with cond` then releases another task's lock and a second task enters the critical section ([script](findings/cpython311_wait_for_lock.py)) | Fixed in 3.12 by the `wait_for` rewrite (GH-96764); rediscovered |
 | [aiotools](https://pypi.org/project/aiotools/) | 2.2.4 | An expired `TaskScope`/`move_on_after` timeout never calls `uncancel()`, so on Python 3.13+ a later failing `TaskGroup` in the same task also cancels the task ([script](findings/aiotools_scope_timeout.py)) | No matching upstream issue found; not reported |
 
-These were found by writing down a property the library promises (at most N
-jobs at once; one execution per key; one task inside a lock; balanced cancel
-requests) and letting SimLoop search schedules,
-timings and cancellations for a counterexample.
+Each comes with a property the library promises (at most N jobs at once;
+one execution per key; one task inside a lock; balanced cancel requests)
+that SimLoop breaks by searching schedules, timings and cancellations. The
+aiotools leak was first spotted while reading the code; the generic
+`strict_cancellation` check now finds it without aiotools-specific
+assertions.
 
 ## Project docs
 
