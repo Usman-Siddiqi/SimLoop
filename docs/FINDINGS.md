@@ -37,7 +37,8 @@ here. Rules (see `CLAUDE.md`):
   special timing (`asyncio.run`, see the script), and under SimLoop with FIFO
   scheduling.
 - **Upstream status:** no matching issue or pull request found in a search of
-  aio-libs/aiojobs on 2026-11-18. Not reported.
+  aio-libs/aiojobs on 2026-11-18. Not reported: Usman decided on 2026-11-18
+  not to report anything upstream yet.
 
 ### 2. async-lru 2.4.0: a stale call evicts the entry that replaced it
 
