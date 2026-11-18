@@ -107,6 +107,45 @@ here. Rules (see `CLAUDE.md`):
   `wait_for`. No report of this exact symptom was looked for or filed; 3.11
   only receives security fixes. Listed as a rediscovery of fixed behaviour.
 
+### 4. aiotools 2.2.4: a `TaskScope` timeout leaves a cancel request on the task
+
+- **Library:** [aiotools](https://pypi.org/project/aiotools/) 2.2.4 (latest
+  release on 2026-11-18; `taskscope.py` is unchanged on the upstream default
+  branch). Affects `TaskScope(timeout=...)`, `move_on_after()` and
+  `ShieldScope(timeout=...)`.
+- **Reproduction:** [`findings/aiotools_scope_timeout.py`](../findings/aiotools_scope_timeout.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** with `SimConfig(strict_cancellation=True)`, fails on 684 of
+  seeds 0-999 with the default scheduler (first failing seed 0) and on 684
+  of 1000 with `scheduler="fifo", timer_jitter=0.001` (first failing seed
+  0). The shrunk run is 8 steps: one `move_on_after` whose timeout fires,
+  then more work in the same task.
+- **Property violated:** a task that is not being cancelled has
+  `cancelling() == 0`. asyncio's `TaskGroup` and `timeout()` depend on this
+  count: whoever suppresses a cancellation it requested must call
+  `uncancel()` (as `asyncio.timeout()` does).
+- **Explanation:** on expiry `TaskScope._on_timeout` calls the host task's
+  real `cancel()` to interrupt the scope body, and the scope converts the
+  resulting `CancelledError` into `TimeoutError` (`move_on_after` then
+  swallows that). Nothing calls `uncancel()` for that request, so the host
+  task's `cancelling()` stays at 1 after the scope is gone, and grows by one
+  per expired scope.
+- **Consequence:** on Python 3.13 and later, `TaskGroup.__aexit__` treats a
+  non-zero `cancelling()` as a cancellation from outside. When a child then
+  fails, it raises the `ExceptionGroup` and also re-cancels the task, so the
+  next `await` raises `CancelledError` although nothing cancelled the task
+  (and `asyncio.run` ends with `CancelledError`). On 3.11 and 3.12 the count
+  still leaks, but `TaskGroup` there does not re-cancel, so the visible
+  effect is limited to code that reads `cancelling()`.
+- **Feasibility:** deterministic; no particular schedule is needed. The
+  script's `plain()` reproduces it with `asyncio.run` and fixed sleeps.
+- **How it was found:** spotted while reading `TaskScope` to write a
+  harness. SimLoop's new generic `strict_cancellation` check (added for this)
+  finds it from the harness without any aiotools-specific assertion.
+- **Upstream status:** no matching issue or pull request found in searches of
+  achimnol/aiotools issues and pull requests for "uncancel", "cancelling",
+  "move_on_after" and "timeout TaskScope" on 2026-11-18. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
@@ -134,6 +173,31 @@ here. Rules (see `CLAUDE.md`):
   the decorator's stated purpose ("avoids cache stampede effects") exactly
   when a backend is failing. Whether that is a bug is the maintainers' call.
 - **Not reported.**
+
+### aiometer 1.0.0: `run_any` returns only after every function has finished
+
+- **Library:** [aiometer](https://pypi.org/project/aiometer/) 1.0.0 (latest
+  release on 2026-11-18; `run_any.py` and `amap.py` are unchanged on the
+  upstream default branch).
+- **Reproduction:** [`findings/aiometer_meters.py`](../findings/aiometer_meters.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** the property "`run_any` returns when the first function
+  completes" fails on all 1000 seeds 0-999 with the default settings (every
+  run has at least two functions with different durations).
+- **What happens:** `run_any` is `amap(...)` plus taking the first item from
+  the result stream. Returning from inside `amap`'s context exits its anyio
+  task group normally, which waits for every remaining function. The other
+  functions are not cancelled, and the first result is only returned once
+  the slowest has finished. On plain asyncio, `run_any([fast, slow])` with
+  0.05 s and 1 s sleeps returns `"fast"` after 1.0 s.
+- **Why it is only suspected:** the README says `run_any` runs the
+  functions "until the first one completes, similarly to `Promise.any()`",
+  and the API docs say it returns "the first available result". That reads
+  as returning at the first completion, but nothing promises that the
+  others are cancelled, and waiting for them may be the intended
+  structured-concurrency behaviour.
+- **Upstream status:** no matching issue or pull request found in searches
+  of florimondmanca/aiometer on 2026-11-18. Not reported.
 
 ## False positives
 
@@ -214,6 +278,12 @@ properties and fault mixes only.
   the connection 68 times in 30 sample runs. An early "lost message" failure
   here was a SimLoop bug (segments in flight when a partition healed could
   overtake the held ones), now fixed.
+- **aiometer 1.0.0 (meters)**, [`findings/aiometer_meters.py`](../findings/aiometer_meters.py):
+  `amap` never ran more than `max_at_once` jobs, spaced starts by at least
+  `1 / max_per_second` and yielded every result; a timed-out or failing
+  `run_on_each` left no job running. 1000 seeds each with the `random`,
+  `pct` and `fifo` plus 1 ms jitter schedulers, all with
+  `strict_cancellation=True`.
 - **aiolimiter 1.3.0**, [`findings/aiolimiter_rate.py`](../findings/aiolimiter_rate.py):
   the leaky-bucket bound (at most `max_rate + rate * window` capacity
   granted in any window) held and no waiter was left unwoken, across 1000

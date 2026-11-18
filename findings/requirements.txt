@@ -13,3 +13,6 @@ anyio==4.16.0
 uvicorn==0.54.0
 starlette==1.10.0
 h11==0.16.0
+aiotools==2.2.4
+typing_extensions>=4.12
+aiometer==1.0.0
