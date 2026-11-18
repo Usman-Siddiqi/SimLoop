@@ -29,6 +29,7 @@ from .errors import (
     StepLimitExceeded,
     TimeLimitExceeded,
 )
+from .net import Host, LinkConfig, Network
 from .scheduling import Scheduler, resolve_scheduler
 
 T = TypeVar("T")
@@ -63,6 +64,10 @@ class SimConfig:
     """Disable automatic GC during the run and collect every N steps instead,
     so finalizers run at reproducible points. ``None`` leaves GC alone."""
     keep_trace: bool = True
+    link: LinkConfig = field(default_factory=LinkConfig)
+    """Default behaviour of every link in the simulated network."""
+    connect_timeout: float = 30.0
+    """How long a TCP connect keeps retrying an unreachable host."""
 
     def replace(self, **changes: Any) -> SimConfig:
         return dataclasses.replace(self, **changes)
@@ -133,6 +138,8 @@ class Simulation:
             max_steps=config.max_steps,
             max_time=config.max_time,
         )
+        self.network = Network(self.loop, link=config.link, connect_timeout=config.connect_timeout)
+        self.loop.network = self.network
         self.properties = PropertyChecker(self.loop.time)
         self.loop.step_hooks.append(self.properties.after_step)
         self.loop.advance_hooks.append(self.properties.before_advance)
@@ -258,6 +265,7 @@ class Simulation:
             if not abandon:
                 return _classify(exc)
         finally:
+            self.network._shutdown()
             for task in loop.tasks:
                 if not task.done():
                     task._log_destroy_pending = False  # type: ignore[attr-defined]
@@ -333,6 +341,16 @@ def now() -> float:
 def rng() -> random.Random:
     """The simulation's random generator: seeded, recorded and shrinkable."""
     return current().random
+
+
+def network() -> Network:
+    """The simulated network of the running simulation."""
+    return current().network
+
+
+def current_host() -> Host:
+    """The simulated host the calling task runs on."""
+    return current().network.current_host()
 
 
 def log(message: str) -> None:

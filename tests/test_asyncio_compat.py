@@ -346,7 +346,7 @@ def test_custom_exception_handler_receives_callback_errors() -> None:
 
 def test_unsimulated_io_fails_closed() -> None:
     async def main() -> None:
-        await asyncio.open_connection("example.com", 80)
+        await asyncio.open_unix_connection("/tmp/socket")
 
     result = simloop.run(main)
     assert result.failure is not None

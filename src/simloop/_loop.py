@@ -23,6 +23,7 @@ from concurrent.futures import Executor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, TypeVarTuple, Unpack, cast
 
+from . import _transport
 from ._choices import ChoiceSource
 from ._trace import Trace
 from .errors import DeadlockError, StepLimitExceeded, TimeLimitExceeded, UnsupportedOperation
@@ -30,6 +31,8 @@ from .scheduling import Scheduler
 
 if TYPE_CHECKING:
     from asyncio.events import _ExceptionHandler, _TaskFactory
+
+    from .net import Network
 
 _T = TypeVar("_T")
 _Ts = TypeVarTuple("_Ts")
@@ -83,7 +86,8 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._step = 0
         self._ready: deque[_Ready] = deque()
         self._batch_left = 0
-        self._timers: list[tuple[float, int, asyncio.TimerHandle]] = []
+        # (fire time, tie-breaker, handle, origin or None for a fresh one)
+        self._timers: list[tuple[float, int, asyncio.TimerHandle, int | None]] = []
         self._timer_seq = itertools.count()
         self._origins = itertools.count(-1, -1)
         self._current_origin: int | None = None
@@ -108,6 +112,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._asyncgen_seq = itertools.count()
         self._asyncgens_shutdown_called = False
 
+        self.network: Network | None = None
         self.errors: list[dict[str, Any]] = []
         self.step_hooks: list[StepHook] = []
         self.advance_hooks: list[AdvanceHook] = []
@@ -181,7 +186,31 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         if self.timer_jitter > 0:
             # Real timers only ever fire late, so jitter is always non-negative.
             fire_at += self.choices.uniform(0.0, self.timer_jitter)
-        heapq.heappush(self._timers, (fire_at, next(self._timer_seq), handle))
+        heapq.heappush(self._timers, (fire_at, next(self._timer_seq), handle, None))
+        handle._scheduled = True  # type: ignore[attr-defined]
+        return handle
+
+    def new_origin(self) -> int:
+        """An origin id for callbacks that must keep their relative order."""
+        return next(self._origins)
+
+    def _call_at_exact(
+        self,
+        when: float,
+        callback: Callable[..., object],
+        *args: Any,
+        context: contextvars.Context | None = None,
+        origin: int | None = None,
+    ) -> asyncio.TimerHandle:
+        """Schedule a framework event (e.g. a network delivery) without timer jitter.
+
+        Events sharing an ``origin`` that fire at the same time keep their
+        scheduling order under every scheduler, which is how a TCP stream stays
+        in order.
+        """
+        self._check_closed()
+        handle = asyncio.TimerHandle(when, callback, args, self, context)
+        heapq.heappush(self._timers, (when, next(self._timer_seq), handle, origin))
         handle._scheduled = True  # type: ignore[attr-defined]
         return handle
 
@@ -192,7 +221,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
     def _release_due_timers(self) -> None:
         timers = self._timers
         while timers:
-            fire_at, _, handle = timers[0]
+            fire_at, _, handle, origin = timers[0]
             if handle.cancelled():
                 heapq.heappop(timers)
                 handle._scheduled = False  # type: ignore[attr-defined]
@@ -201,12 +230,12 @@ class SimEventLoop(asyncio.AbstractEventLoop):
                 break
             heapq.heappop(timers)
             handle._scheduled = False  # type: ignore[attr-defined]
-            self._ready.append(_Ready(handle, next(self._origins)))
+            self._ready.append(_Ready(handle, next(self._origins) if origin is None else origin))
 
     def _next_timer(self) -> float | None:
         timers = self._timers
         while timers and timers[0][2].cancelled():
-            _, _, handle = heapq.heappop(timers)
+            handle = heapq.heappop(timers)[2]
             handle._scheduled = False  # type: ignore[attr-defined]
         return timers[0][0] if timers else None
 
@@ -295,6 +324,8 @@ class SimEventLoop(asyncio.AbstractEventLoop):
             task = factory(self, coro) if context is None else factory(self, coro, context=context)
             task.set_name(name)
         self._tasks[task] = False
+        if self.network is not None:
+            self.network._adopt(task, context)
         parent = asyncio.current_task(self)
         self._record(
             "spawn",
@@ -404,7 +435,7 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._closed = True
         self._ready.clear()
         self._batch_left = 0
-        for _, _, handle in self._timers:
+        for _, _, handle, _ in self._timers:
             handle._scheduled = False  # type: ignore[attr-defined]
         self._timers.clear()
 
@@ -543,13 +574,65 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         task = asyncio.current_task(self) if self._running else None
         return task.get_name() if task is not None else "loop"
 
+    # -- simulated network ------------------------------------------------------------
+
+    def _require_network(self) -> Network:
+        if self.network is None:
+            raise UnsupportedOperation("this SimEventLoop has no simulated network attached")
+        return self.network
+
+    async def getaddrinfo(
+        self,
+        host: bytes | str | None,
+        port: bytes | str | int | None,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[Any, ...]]:
+        return await self._require_network().getaddrinfo(
+            host, port, family=family, type=type, proto=proto, flags=flags
+        )
+
+    async def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+        return await self._require_network().getnameinfo(sockaddr, flags)
+
+    async def create_connection(  # type: ignore[override]
+        self,
+        protocol_factory: Callable[[], asyncio.BaseProtocol],
+        host: str | None = None,
+        port: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[asyncio.Transport, asyncio.BaseProtocol]:
+        return await _transport.create_connection(
+            self._require_network(), protocol_factory, host, port, **kwargs
+        )
+
+    async def create_server(  # type: ignore[override]
+        self,
+        protocol_factory: Callable[[], asyncio.BaseProtocol],
+        host: str | list[str] | None = None,
+        port: int | None = None,
+        **kwargs: Any,
+    ) -> asyncio.AbstractServer:
+        return await _transport.create_server(
+            self._require_network(), protocol_factory, host, port, **kwargs
+        )
+
+    async def create_datagram_endpoint(  # type: ignore[override]
+        self,
+        protocol_factory: Callable[[], asyncio.DatagramProtocol],
+        local_addr: tuple[str, int] | None = None,
+        remote_addr: tuple[str, int] | None = None,
+        **kwargs: Any,
+    ) -> tuple[asyncio.DatagramTransport, asyncio.DatagramProtocol]:
+        return await _transport.create_datagram_endpoint(
+            self._require_network(), protocol_factory, local_addr, remote_addr, **kwargs
+        )
+
     # -- not simulated: fail closed ----------------------------------------------
 
-    getaddrinfo = _unsupported("getaddrinfo")
-    getnameinfo = _unsupported("getnameinfo")
-    create_connection = _unsupported("create_connection")
-    create_server = _unsupported("create_server")
-    create_datagram_endpoint = _unsupported("create_datagram_endpoint")
     create_unix_connection = _unsupported("create_unix_connection")
     create_unix_server = _unsupported("create_unix_server")
     connect_accepted_socket = _unsupported("connect_accepted_socket")

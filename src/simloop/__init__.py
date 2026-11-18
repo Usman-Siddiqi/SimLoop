@@ -11,9 +11,11 @@ from ._runtime import (
     Simulation,
     always,
     current,
+    current_host,
     eventually,
     in_simulation,
     log,
+    network,
     now,
     rng,
     run,
@@ -28,6 +30,7 @@ from .errors import (
     TimeLimitExceeded,
     UnsupportedOperation,
 )
+from .net import Host, LinkConfig, Network
 from .scheduling import FifoScheduler, RandomScheduler, Scheduler
 
 __version__ = "0.1.0.dev0"
@@ -39,7 +42,10 @@ __all__ = [
     "Failure",
     "FailureGroup",
     "FifoScheduler",
+    "Host",
     "InvariantViolation",
+    "LinkConfig",
+    "Network",
     "NondeterminismError",
     "Property",
     "RandomScheduler",
@@ -57,10 +63,12 @@ __all__ = [
     "__version__",
     "always",
     "current",
+    "current_host",
     "eventually",
     "explore",
     "in_simulation",
     "log",
+    "network",
     "now",
     "rng",
     "run",
