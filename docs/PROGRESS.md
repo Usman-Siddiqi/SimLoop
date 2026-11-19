@@ -147,6 +147,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   socket. Pool, replies and recovery clean under timeouts, resets and
   crashes. Suspected: a `getMore` cut by a client-side timeout leaves its
   server cursor open (pymongo skips the matching CSOT spec test).
+- Ran every findings script with `strict_cancellation=True` forced on
+  (a wrapper over `simloop.run`). Only grpclib flagged: a call past its
+  deadline leaves a cancel request on the caller's task, which on 3.13+
+  makes a later failing `TaskGroup` cancel the task (confirmed on plain
+  asyncio, not reported).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

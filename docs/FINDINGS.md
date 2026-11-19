@@ -1236,6 +1236,53 @@ here. Rules (see `CLAUDE.md`):
   trigger; #22 (open) is the Postgres connection sharing. No report of
   this race found. Not reported.
 
+### 28. grpclib 0.4.9: a call that runs past its deadline leaves a cancel request on the caller's task
+
+- **Library:** [grpclib](https://pypi.org/project/grpclib/) 0.4.9 (latest
+  release), client side; `grpclib.utils.Wrapper` is also used by the
+  server and the health checker.
+- **Reproduction:** [`findings/grpclib_deadline_cancel.py`](../findings/grpclib_deadline_cancel.py)
+  (the SimLoop harness, a `Wrapper` that uncancels as a control, and a
+  plain-asyncio reproduction).
+- **Seeds:** three client tasks make six unary calls each (server delay
+  0-60 ms) over the simulated network. Seeds 0-99, default scheduler /
+  `scheduler="fifo", timer_jitter=0.001`: without deadlines and with an
+  outer `asyncio.wait_for`, all pass; with the call's own `timeout=`, 99 /
+  100 fail (first seed 0 / 0), e.g. seed 0: `1-0 raised TimeoutError,
+  task.cancelling() == 1`. With the control `Wrapper`, all 200 pass. Found
+  by `strict_cancellation=True` on the reset-leak harness (#20), which
+  reported the client task finishing with two cancellation requests
+  pending.
+- **Property violated:** a library that cancels the caller's task to
+  interrupt it, and turns the `CancelledError` into its own exception,
+  takes the request back with `task.uncancel()`, so the task's
+  `cancelling()` count only reflects cancellation from outside.
+- **Explanation:** when the deadline timer fires, `DeadlineWrapper` calls
+  `Wrapper.cancel(TimeoutError(...))`, which calls `task.cancel()` on each
+  task inside the wrapper. `Wrapper.__exit__` then raises the stored
+  `TimeoutError` instead of the `CancelledError` and never calls
+  `uncancel()`, so each expired call leaves one more request on the task.
+  asyncio's own structured concurrency reads that count: on Python 3.13
+  and 3.14, the next `asyncio.TaskGroup` in that task whose child fails
+  raises its `ExceptionGroup` but leaves a cancellation armed, and the
+  task's following `await` raises `CancelledError`, with nothing having
+  cancelled it.
+
+  On plain asyncio (3.13.18 and 3.14.6): a unary call to a handler that
+  sleeps 1 s, with `timeout=0.1`, raises `TimeoutError` and leaves
+  `task.cancelling() == 1`; after an ordinary `TaskGroup` whose child
+  raises `ValueError`, the next `await asyncio.sleep(0.01)` raises
+  `CancelledError`.
+- **Impact:** medium: deadlines are the normal way to call gRPC services,
+  and a long-lived task (a request handler, a worker loop) that hits one
+  and later uses a `TaskGroup` (directly or through a library) gets
+  cancelled spuriously, or a later `asyncio.timeout()` misreads whose
+  cancellation it is.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** searched issues and pull requests for `uncancel`,
+  `cancelling`, `TaskGroup` and cancellation: nothing matching (#131 is
+  about server-side cancellation handling). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
