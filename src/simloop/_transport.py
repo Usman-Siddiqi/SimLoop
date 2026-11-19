@@ -900,8 +900,22 @@ async def create_datagram_endpoint(
         network, owner, bound, protocol, remote, context, family or socket.AF_INET
     )
     network._datagrams[(owner.name, bound)] = endpoint
-    network.loop.call_soon(protocol.connection_made, endpoint, context=context)
+    loop = network.loop
+    # As in asyncio: connection_made runs before the endpoint is returned.
+    waiter = loop.create_future()
+    loop.call_soon(protocol.connection_made, endpoint, context=context)
+    loop.call_soon(_set_result_unless_cancelled, waiter, context=context)
+    try:
+        await waiter
+    except BaseException:
+        endpoint.close()
+        raise
     return endpoint, protocol
+
+
+def _set_result_unless_cancelled(waiter: asyncio.Future[None]) -> None:
+    if not waiter.cancelled():
+        waiter.set_result(None)
 
 
 def _virtual(sock: Any) -> VirtualSocket:

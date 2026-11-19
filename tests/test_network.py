@@ -830,3 +830,19 @@ def test_dual_stack_ipv6_udp_sees_ipv4_mapped_addresses() -> None:
         (b"ping", ("::ffff:10.0.0.2", 4433, 0, 0)),
         "::ffff:10.0.0.1",
     ]
+
+
+def test_datagram_endpoint_is_connected_when_returned() -> None:
+    async def main() -> bool:
+        simloop.network()
+        made: list[asyncio.BaseTransport] = []
+
+        class Recorder(asyncio.DatagramProtocol):
+            def connection_made(self, transport: asyncio.BaseTransport) -> None:
+                made.append(transport)
+
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_datagram_endpoint(Recorder, local_addr=("0.0.0.0", 0))
+        return made == [transport]
+
+    assert run_ok(main).value is True
