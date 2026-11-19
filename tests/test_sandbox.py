@@ -212,7 +212,7 @@ def test_datetime_imported_by_name_is_simulated() -> None:
 
     aware, today, kind = run_ok(main).value or ("", "", "")
     assert aware == "2024-01-02T00:00:00+00:00"
-    assert today == datetime.date.fromtimestamp(simloop.SimConfig().epoch + 86400).isoformat()
+    assert today == "2024-01-02"
     assert kind == "<class 'datetime.datetime'>"
     assert vars(support_datetime)["datetime"] is datetime.datetime
 

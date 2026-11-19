@@ -451,7 +451,11 @@ ordering in the code under test is reproducible across invocations. Exit code
   reseeds the global `random` generator, and replaces `os.urandom` (which covers `uuid4`, `secrets` and
   `SystemRandom`). Third-party modules that imported these functions by
   name (`from time import monotonic`, as psycopg_pool does) get their module
-  globals swapped for the run too. A blocking `time.sleep` stalls the whole simulated loop,
+  globals swapped for the run too. Local time (`time.localtime`, `mktime`,
+  `strftime`, `datetime.now()`, `fromtimestamp()`) is a simulated fixed zone,
+  UTC unless `SimConfig(utc_offset=...)` says otherwise, so a run never
+  depends on the machine's `TZ`, and an offset such as `-5` exposes code that
+  mixes local and UTC times. A blocking `time.sleep` stalls the whole simulated loop,
   just as it would stall a real one. A PEP 578 audit hook rejects real
   sockets, DNS lookups, threads and subprocesses and records the leak, so the
   run fails even if the code swallows the exception.
@@ -495,8 +499,9 @@ These are current, known gaps rather than design limits unless stated.
 - **`datetime.now()`, `utcnow()` and `date.today()` are simulated** by
   swapping stand-in classes into `datetime` and into modules that imported
   the classes by name. A class reference stored anywhere else (a dict, a
-  default argument) keeps the real clock. Local-time conversions use the
-  machine's time zone, as `time.localtime` does.
+  default argument) keeps the real clock. The simulated zone has a fixed
+  offset (no daylight-saving transitions), and `astimezone()` on a naive
+  `datetime` still converts with the machine's zone.
 - `run_in_executor` and `to_thread` run the function inline (with blocking
   sleeps counted as its duration) instead of on a thread. Code that blocks a
   worker thread waiting for the event loop will deadlock.
