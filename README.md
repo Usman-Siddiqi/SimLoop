@@ -526,6 +526,7 @@ against the pinned versions.
 | [aiotools](https://pypi.org/project/aiotools/) | 2.2.4 | An expired `TaskScope`/`move_on_after` timeout never calls `uncancel()`, so on Python 3.13+ a later failing `TaskGroup` in the same task also cancels the task ([script](findings/aiotools_scope_timeout.py)) | No matching upstream issue found; not reported |
 | [cashews](https://pypi.org/project/cashews/) | 7.6.0 | With the default `@cache(..., protected=True)`, one caller's timeout cancels the shared call, and every concurrent caller for the same key gets `CancelledError` ([script](findings/cashews_shared_cancel.py)) | No matching upstream issue found; not reported |
 | [backoff](https://pypi.org/project/backoff/) | 2.2.1 | `max_time` is checked against the elapsed time from before the failed attempt, and against the wall clock, so attempts start after the deadline (and a backward clock step extends it) ([script](findings/backoff_max_time.py)) | Already known upstream (#186, #149; open PRs #130, #150); rediscovered |
+| [singleflight](https://pypi.org/project/singleflight/) | 0.1.3 | When the leading caller is cancelled, concurrent callers get `None` as the result, and every later call for that key returns `None` without running the function ([script](findings/singleflight_cancelled_leader.py)) | No upstream issues exist; not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests)

@@ -204,6 +204,32 @@ here. Rules (see `CLAUDE.md`):
   request #130 describe the stale `elapsed`; issue #149 and open pull
   request #150 the wall clock. Listed as a rediscovery, not a new report.
 
+### 7. singleflight 0.1.3: a cancelled leader poisons its key with `None`
+
+- **Library:** [singleflight](https://pypi.org/project/singleflight/) 0.1.3
+  (latest release on 2026-11-18; `asynchronous.py` is unchanged on the
+  upstream default branch), `SingleFlightAsync`.
+- **Reproduction:** [`findings/singleflight_cancelled_leader.py`](../findings/singleflight_cancelled_leader.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** 1 to 4 callers for one key, some with a 50 ms timeout: fails on
+  263 of seeds 0-999 with the default scheduler and with `scheduler="fifo"`
+  (first failing seed 1: a concurrent caller gets `None`; first seed 18 of
+  the second signature: a later call gets `None`).
+- **Property violated:** every caller that is not cancelled gets `fn`'s
+  result, and the key can be used again once the call is over.
+- **Explanation:** the leader runs `fn` inside `try/except Exception/
+  finally`. A `CancelledError` is not an `Exception`, so it skips the
+  handler; the `finally` sets the event with `res` and `err` still `None`,
+  and the exception then skips the `del self.m[key]` after the block.
+  Concurrent callers wake and return `None`, and the key's entry stays in
+  the map with its event set, so every later call for that key returns
+  `None` immediately without calling `fn`. On plain asyncio: a leader with a
+  10 ms timeout over a 100 ms `fn`; the concurrent caller and a later call
+  both get `None`.
+- **Feasibility:** deterministic once the leader is cancelled during `fn`.
+- **Upstream status:** the repository (aarondwi/singleflight) has no issues
+  or pull requests at all (search on 2026-11-18). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
