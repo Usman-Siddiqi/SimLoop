@@ -7,9 +7,10 @@ Two mechanisms:
   the run seed, ``datetime.now()`` and ``date.today()`` read the simulated
   wall clock (see :mod:`simloop._vdatetime`), and ``os.urandom`` (and with
   it ``uuid4``, ``secrets`` and ``SystemRandom``) returns seeded bytes.
-  Everything is restored on exit. References captured before the run
-  (``from time import monotonic``) are not affected; that is a documented
-  limitation.
+  Everything is restored on exit. Third-party modules that imported these
+  functions by name (``from time import monotonic``) have those module
+  globals swapped too; references kept anywhere else (default arguments,
+  closures, class attributes) and in the standard library are not.
 * An audit hook (PEP 578) rejects real sockets, DNS, threads and subprocesses
   while a sandbox is active on the current thread, and records the leak so
   the run fails even if the code catches the exception.
@@ -25,8 +26,8 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
-from types import TracebackType
+from collections.abc import Callable, Iterable
+from types import ModuleType, TracebackType
 from typing import Any
 
 from . import _vdatetime
@@ -57,6 +58,51 @@ _BLOCKED_EVENTS = frozenset(
         "_thread.start_joinable_thread",
     }
 )
+
+# Functions that libraries commonly import by name. Their originals are taken
+# here, at import time, before any sandbox patches them.
+_CAPTURABLE: dict[int, object] = {
+    id(function): function
+    for function in (
+        time.time,
+        time.time_ns,
+        time.monotonic,
+        time.monotonic_ns,
+        time.perf_counter,
+        time.perf_counter_ns,
+        time.sleep,
+        os.urandom,
+    )
+}
+# Standard-library modules keep the real functions: threading, queue and the
+# like time real threads, which a simulated clock would hang. Test tooling
+# measures real durations.
+_KEEP_REAL = frozenset(sys.stdlib_module_names) | {
+    "simloop",
+    "_pytest",
+    "pytest",
+    "pluggy",
+    "coverage",
+}
+_captured_scanned: set[str] = set()
+_captured: list[tuple[ModuleType, str, object]] = []
+
+
+def _scan_captured(names: Iterable[str]) -> list[tuple[ModuleType, str, object]]:
+    found: list[tuple[ModuleType, str, object]] = []
+    for name in names:
+        module = sys.modules.get(name)
+        if not isinstance(module, ModuleType) or name.partition(".")[0] in _KEEP_REAL:
+            continue
+        try:
+            items = list(vars(module).items())
+        except TypeError:
+            continue
+        for attr, value in items:
+            if id(value) in _CAPTURABLE and _CAPTURABLE[id(value)] is value:
+                found.append((module, attr, value))
+    return found
+
 
 _local = threading.local()
 _hook_lock = threading.Lock()
@@ -92,6 +138,9 @@ class Sandbox:
         self.suspended = False
         self._saved: list[tuple[object, str, object]] = []
         self._datetime_undo: list[tuple[object, str, object]] = []
+        self._captured_undo: list[tuple[ModuleType, str, object]] = []
+        self._replacements: dict[int, object] = {}
+        self._modules_before: frozenset[str] = frozenset()
         self._saved_env: dict[str, str] = {}
         self._random_state: tuple[Any, ...] | None = None
         self._bytes = random.Random(derive_seed(seed, "os.urandom"))
@@ -197,6 +246,39 @@ class Sandbox:
             (threading.Thread, "start", self._thread_start),
         ]
 
+    def _install_captured(self) -> None:
+        new = [name for name in list(sys.modules) if name not in _captured_scanned]
+        _captured_scanned.update(new)
+        _captured.extend(_scan_captured(new))
+        for module, attr, original in _captured:
+            if getattr(module, attr, None) is original:
+                setattr(module, attr, self._replacements[id(original)])
+                self._captured_undo.append((module, attr, original))
+        self._modules_before = frozenset(sys.modules)
+
+    def _uninstall_captured(self) -> None:
+        for module, attr, original in reversed(self._captured_undo):
+            if getattr(module, attr, None) is self._replacements[id(original)]:
+                setattr(module, attr, original)
+        self._captured_undo.clear()
+        # A module first imported inside the run captured the simulated
+        # function; point it back at the real one so it outlives the run.
+        originals = {id(new): _CAPTURABLE[key] for key, new in self._replacements.items()}
+        for name in [name for name in list(sys.modules) if name not in self._modules_before]:
+            loaded = sys.modules.get(name)
+            if not isinstance(loaded, ModuleType):
+                continue
+            try:
+                items = list(vars(loaded).items())
+            except TypeError:
+                continue
+            for attr, value in items:
+                if (
+                    id(value) in originals
+                    and self._replacements.get(id(originals[id(value)])) is value
+                ):
+                    setattr(loaded, attr, originals[id(value)])
+
     # -- context manager -------------------------------------------------------
 
     def __enter__(self) -> Sandbox:
@@ -207,8 +289,12 @@ class Sandbox:
         self._random_state = inst.getstate()
         inst.seed(derive_seed(self.seed, "random"))
         for owner, name, replacement in self._patches():
-            self._saved.append((owner, name, getattr(owner, name)))
+            original = getattr(owner, name)
+            self._saved.append((owner, name, original))
+            if id(original) in _CAPTURABLE:
+                self._replacements[id(original)] = replacement
             setattr(owner, name, replacement)
+        self._install_captured()
         self._datetime_undo = _vdatetime.install(self._wall)
         # A simulated network has no proxy; proxy settings inherited from the
         # real environment would send simulated traffic to an address that does
@@ -230,6 +316,7 @@ class Sandbox:
         _local.sandbox = None
         os.environ.update(self._saved_env)
         _vdatetime.uninstall(self._datetime_undo)
+        self._uninstall_captured()
         self._datetime_undo = []
         for owner, name, original in reversed(self._saved):
             setattr(owner, name, original)

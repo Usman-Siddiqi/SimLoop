@@ -449,7 +449,9 @@ ordering in the code under test is reproducible across invocations. Exit code
 - **`Sandbox`** patches `time.time`/`monotonic`/`perf_counter`/`sleep` (and
   friends) and `datetime.now`/`date.today` to read the simulated clock,
   reseeds the global `random` generator, and replaces `os.urandom` (which covers `uuid4`, `secrets` and
-  `SystemRandom`). A blocking `time.sleep` stalls the whole simulated loop,
+  `SystemRandom`). Third-party modules that imported these functions by
+  name (`from time import monotonic`, as psycopg_pool does) get their module
+  globals swapped for the run too. A blocking `time.sleep` stalls the whole simulated loop,
   just as it would stall a real one. A PEP 578 audit hook rejects real
   sockets, DNS lookups, threads and subprocesses and records the leak, so the
   run fails even if the code swallows the exception.
@@ -484,8 +486,11 @@ These are current, known gaps rather than design limits unless stated.
   make them hash by creation order inside simulations (outside, nothing
   changes). `simloop check` and `explore` point at the first event where an
   unpatched set changes a run.
-- **References captured before a run are not virtualized.** `from time import
-  monotonic` at import time keeps the real clock. `explore` catches the
+- **Some references captured before a run are not virtualized.** Module
+  globals in third-party code (`from time import monotonic`) are swapped;
+  a clock stored anywhere else (a default argument, a closure, a class
+  attribute, a dict) keeps the real clock, and so does the standard library,
+  whose `threading` and `queue` time real threads. `explore` catches the
   resulting non-determinism after the fact, but cannot prevent it.
 - **`datetime.now()`, `utcnow()` and `date.today()` are simulated** by
   swapping stand-in classes into `datetime` and into modules that imported

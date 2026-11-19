@@ -18,8 +18,9 @@ from .workloads import busy_system
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = simloop.SimConfig(timer_jitter=0.001)
 
-# Captured at import, before any sandbox exists, so it stays the real clock.
-_real_perf_counter = time.perf_counter
+# Captured at import inside a container, where the sandbox does not look, so
+# it stays the real clock. (A plain module global would be swapped.)
+_REAL_CLOCK = {"perf_counter": time.perf_counter}
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42, 2**40])
@@ -98,7 +99,7 @@ def test_identical_across_processes_and_hash_seeds() -> None:
 def test_explore_flags_code_that_leaks_real_time() -> None:
     async def leaky() -> None:
         # A reference taken before the sandbox: wall-clock noise steers the run.
-        await asyncio.sleep((_real_perf_counter() * 1e6) % 1)
+        await asyncio.sleep((_REAL_CLOCK["perf_counter"]() * 1e6) % 1)
         raise AssertionError("always fails")
 
     report = simloop.explore(leaky, seeds=range(3))

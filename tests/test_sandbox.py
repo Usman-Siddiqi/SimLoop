@@ -10,8 +10,10 @@ import random
 import secrets
 import socket
 import subprocess
+import sys
 import threading
 import time
+import types
 import uuid
 
 import simloop
@@ -227,3 +229,47 @@ def test_datetime_follows_a_host_clock_offset() -> None:
         return str(await host.run(skewed()))
 
     assert run_ok(main).value == "2024-01-01T00:00:30+00:00"
+
+
+def test_time_functions_imported_by_name_are_simulated() -> None:
+    from . import support_time
+
+    async def main() -> tuple[float, bytes]:
+        await asyncio.sleep(3600)
+        return support_time.readings()
+
+    first = run_ok(main, seed=7).value
+    again = run_ok(main, seed=7).value
+    assert first is not None
+    assert first[0] == 3600.5
+    assert first == again
+    assert vars(support_time)["monotonic"] is time.monotonic
+    assert vars(support_time)["sleep"] is time.sleep
+    assert vars(support_time)["urandom"] is os.urandom
+
+
+def test_a_module_imported_inside_the_run_keeps_the_real_functions() -> None:
+    late = types.ModuleType("simloop_test_late_import")
+
+    async def main() -> float:
+        exec("from time import monotonic", vars(late))
+        sys.modules[late.__name__] = late
+        await asyncio.sleep(10)
+        return float(late.monotonic())
+
+    try:
+        assert run_ok(main).value == 10.0
+        assert vars(late)["monotonic"] is time.monotonic
+    finally:
+        sys.modules.pop(late.__name__, None)
+
+
+def test_standard_library_modules_keep_the_real_clock() -> None:
+    import queue
+
+    real = time.monotonic
+
+    async def main() -> bool:
+        return bool(vars(queue)["time"] is real)
+
+    assert run_ok(main).value is True
