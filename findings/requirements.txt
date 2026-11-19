@@ -41,3 +41,4 @@ aiocron==2.1
 apscheduler==3.11.3
 pyrate-limiter==4.5.1
 aio-throttle==1.7.0
+aiochannel==1.4.1

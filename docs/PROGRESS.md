@@ -67,7 +67,8 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   aside); pyrate-limiter 4.5.1 rate windows under cancellation.
 - aio-throttle 1.7.0: cancelled waiters stay counted as queued, so
   requests are rejected for a full queue that has room; its random-reject
-  quota is inverted (confirmed, not reported).
+  quota is inverted (confirmed, not reported). aiochannel 1.4.1: `put()`
+  on a closed, full channel raises `ChannelFull` (low impact).
 - Circuit breakers, one model-based harness for four libraries:
   circuitbreaker 2.1.3 and aiocircuitbreaker 2.0.0 count a cancelled call as
   a success (a timed-out half-open trial closes the circuit); aiobreaker

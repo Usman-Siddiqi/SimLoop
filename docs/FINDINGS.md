@@ -694,6 +694,35 @@ here. Rules (see `CLAUDE.md`):
   requests (dependency bumps, CI, CODEOWNERS); none about either problem.
   Not reported.
 
+### 18. aiochannel 1.4.1: `put()` on a closed, full channel raises `ChannelFull`
+
+- **Library:** [aiochannel](https://pypi.org/project/aiochannel/) 1.4.1
+  (latest release, 2026-07-18; `put_nowait` is unchanged on the upstream
+  default branch).
+- **Reproduction:** [`findings/aiochannel_close.py`](../findings/aiochannel_close.py).
+- **Seeds:** 3 producers and 3 consumers on a `Channel(maxsize=1-3)`, every
+  `put`/`get` under a random `asyncio.timeout`, the channel closed at a
+  random time while producers run. "A put after the close raises
+  `ChannelClosed`" fails on 88 of seeds 0-499 with the default scheduler
+  (first seed 10) and on 94 with `scheduler="fifo", timer_jitter=0.001`
+  (first seed 11). With the harness also accepting `ChannelFull` after a
+  close, every item put was consumed exactly once and `join()` returned on
+  all 1000 seeds.
+- **Property violated:** `put()`'s docstring: "If the channel is closed or
+  closing, raise ChannelClosed."
+- **Explanation:** `put()` waits while `full() and not closed`, so once the
+  channel is closed it falls through to `put_nowait()`, which checks
+  `full()` before the closed flag and raises `ChannelFull` while undrained
+  items fill the buffer. A blocking `put` never raises `ChannelFull`
+  otherwise, so a producer written as `except ChannelClosed: break` crashes
+  instead of stopping. On plain asyncio: `Channel(1)`, one `put`, `close()`,
+  then `await put(...)` raises `ChannelFull`.
+- **Impact:** low; the error type is wrong, nothing is lost.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** tudborg/aiochannel has 9 issues and 26 pull
+  requests; #3 (an `InvalidStateError` during close) is fixed and nothing
+  matches this. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

@@ -549,6 +549,7 @@ against the pinned versions.
 | [aiobreaker](https://pypi.org/project/aiobreaker/) | 1.2.0 | The reopen time mixes `utcnow()` and `now()`: west of UTC it is hours late, east of UTC it is `None` and `time_remaining` raises `TypeError` (found with a simulated time zone) ([script](findings/circuit_breakers.py)) | No matching upstream issue found; not reported |
 | [purgatory](https://pypi.org/project/purgatory/) | 3.0.2 | Every rejected call re-raises the same exception object, so its traceback grows by five frames per rejection while the circuit is open ([script](findings/circuit_breakers.py)) | No upstream issues exist; not reported |
 | [aio-throttle](https://pypi.org/project/aio-throttle/) | 1.7.0 | A waiter that gives up stays counted as queued, so requests are rejected for a "full queue" that has room (and `LOW` priority is starved); `RandomRejectThrottleQuota` accepts with the reject probability ([script](findings/aio_throttle_queue.py)) | No matching upstream issue found; not reported |
+| [aiochannel](https://pypi.org/project/aiochannel/) | 1.4.1 | `put()` on a closed channel that still holds `maxsize` items raises `ChannelFull` instead of the documented `ChannelClosed` ([script](findings/aiochannel_close.py)) | No matching upstream issue found; not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests;
