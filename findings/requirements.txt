@@ -39,3 +39,4 @@ aiobreaker==1.2.0
 purgatory==3.0.2
 aiocron==2.1
 apscheduler==3.11.3
+pyrate-limiter==4.5.1

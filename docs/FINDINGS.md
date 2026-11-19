@@ -885,3 +885,10 @@ properties and fault mixes only.
   say so; #1199 discusses the wording). APScheduler's DST handling has many
   recent upstream issues and PRs (#1144, #1183, #1198, #1200); this
   harness did not reach those cases.
+- **pyrate-limiter 4.5.1 (`Limiter`, in-memory bucket)**, [`findings/pyrate_limiter_window.py`](../findings/pyrate_limiter_window.py):
+  with two rates (5/s and 12/3 s), weights 1-2, the limiter's own timeout
+  and outer `wait_for` cancellations, no window of either rate held more
+  than its limit; 300 seeds each with `random` and `fifo` plus 1 ms jitter,
+  `strict_cancellation=True`. The bucket's leak ran in an event-loop task
+  (the bucket marked async) instead of its usual background thread, so
+  races with that thread were not covered.
