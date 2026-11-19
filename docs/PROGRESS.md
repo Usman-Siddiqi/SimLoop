@@ -2,6 +2,39 @@
 
 Newest session first. Each entry: done, in progress, known issues, next steps.
 
+## Session 5 (2026-11-19): cancellation through shared futures, DataLoaders
+
+### Done
+- `strict_cancellation`'s stray-cancel check now follows cancellation
+  through a shared plain `Future`: the loop records which tasks wait on each
+  future, and a task that ends cancelled after awaiting a future that was
+  cancelled on behalf of another waiter is reported, naming that waiter. A
+  future a library cancels to wake its own task (aiohttp) is still accepted.
+  Every existing harness was re-swept with the check on, random and fifo:
+  no new hits besides the recorded bugs.
+- **Findings**: singleflight 0.1.3 `SingleFlightAsync`: a cancelled leader
+  hands concurrent callers `None` and leaves the key returning `None` for
+  good (confirmed, not reported). aiodataloader 0.4.3: one caller's
+  cancellation cancels the cached future every caller of the key shares, and
+  the cancelled future stays cached so later loads fail (confirmed, not
+  reported). strawberry-graphql 0.341.2 `DataLoader`: the same spread,
+  without the cache poisoning (known upstream, open PR #4803; rediscovered
+  by the generic check).
+- 232 tests.
+
+### In progress
+- Nothing half-done.
+
+### Known issues
+- Same as session 4.
+
+### Next steps
+1. More shared-future/shared-task patterns: other DataLoader ports,
+   request-coalescing helpers in HTTP clients and ORMs, `asyncio.shield`
+   misuse.
+2. Run every findings harness with `strict_cancellation=True` in CI.
+3. Coverage- or novelty-guided seed exploration (M8, optional).
+
 ## Session 4 (2026-11-18): timeline, fault schedules, cancellation checks, more findings
 
 ### Done

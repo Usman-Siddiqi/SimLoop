@@ -230,6 +230,73 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** the repository (aarondwi/singleflight) has no issues
   or pull requests at all (search on 2026-11-18). Not reported.
 
+### 8. aiodataloader 0.4.3: one caller's cancellation fails every caller of a key, and stays cached
+
+- **Library:** [aiodataloader](https://pypi.org/project/aiodataloader/) 0.4.3
+  (latest release on 2026-11-19; `load()` and the cache lookup are unchanged
+  on the upstream default branch), `DataLoader` with caching on (the
+  default).
+- **Reproduction:** [`findings/aiodataloader_shared_future.py`](../findings/aiodataloader_shared_future.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** 1 to 4 callers of one key, some with a 50 ms timeout: with
+  `SimConfig(strict_cancellation=True)` fails on 390 of seeds 0-999 with the
+  default scheduler and with `scheduler="fifo"` (first failing seed 0: a
+  concurrent caller ends with a stray `CancelledError`; first seed 5 of the
+  second signature: a later `load` raises `CancelledError`). Without
+  `strict_cancellation` the same 390 seeds fail on the harness's own
+  assertions.
+- **Property violated:** a caller that is not cancelled gets the value, and
+  the key loads again once the batch is over.
+- **Explanation:** `load(key)` returns a plain `Future` and caches it, so
+  every caller of the key awaits the same object. A task that is cancelled
+  while awaiting a future cancels the future itself, so one caller's
+  `wait_for` timeout, client disconnect or `TaskGroup` abort cancels the
+  shared future: every concurrent caller of the key raises `CancelledError`
+  although nothing cancelled it, and the batch result for the key is
+  dropped (the `done()` guards added for the `InvalidStateError` reports
+  skip it). The cancelled future also stays in the cache, and `load`
+  returns a cached future without checking its state, so every later `load`
+  of that key raises `CancelledError` at once until `clear(key)` is called.
+  Loaders are often created per request, which limits the damage to that
+  request; a long-lived loader keeps the key broken. On plain asyncio, a
+  caller with a 10 ms timeout and a caller with none, over a 100 ms batch:
+  the second caller gets `CancelledError` with `cancelling()` 0, and a later
+  `load` also gets `CancelledError`.
+- **Feasibility:** deterministic once two callers of a key overlap and one
+  is cancelled; reproduces with `asyncio.run` and fixed sleeps.
+- **How it was found:** SimLoop's `strict_cancellation` check, extended for
+  this to follow cancellation through a shared plain future, flags the
+  concurrent caller; the later-load assertion catches the cache poisoning.
+- **Upstream status:** searches of syrusakbary/aiodataloader on 2026-11-19
+  found no issue about either effect. Closed pull requests #44 and #55 fix
+  the `InvalidStateError` from setting a result on a cancelled future, and
+  open pull request #60 is about an older failed batch clearing a
+  replacement entry; none covers cancellation spreading between callers or
+  the cancelled future staying cached. Not reported.
+
+### 9. strawberry-graphql 0.341.2: one caller's cancellation fails every caller of a DataLoader key
+
+- **Library:** [strawberry-graphql](https://pypi.org/project/strawberry-graphql/)
+  0.341.2 (latest release on 2026-11-19), `strawberry.dataloader.DataLoader`.
+- **Reproduction:** [`findings/strawberry_dataloader_cancel.py`](../findings/strawberry_dataloader_cancel.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** the same workload as the aiodataloader harness fails on 316 of
+  seeds 0-999 with `strict_cancellation=True`, with the default scheduler and
+  with `scheduler="fifo"` (first failing seed 0).
+- **Property violated:** a caller that is not cancelled gets the value.
+- **Explanation:** the same shared-future mechanism as aiodataloader: every
+  caller of a cached key awaits one future, and one caller's cancellation
+  cancels it for all of them. Strawberry skips a cancelled future in its
+  cache, so later loads work. On plain asyncio the concurrent caller gets
+  `CancelledError` with `cancelling()` 0, and a later load returns the value.
+- **Feasibility:** deterministic once two callers overlap and one is
+  cancelled. The upstream pull request notes that graphql-core 3.3 cancels
+  the sibling resolvers of a failing non-null field, which triggers it
+  inside a single query.
+- **Upstream status:** already known: open pull request
+  strawberry-graphql/strawberry#4803 (2026-11-10). Listed as a rediscovery
+  by the generic check, not a new report.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
