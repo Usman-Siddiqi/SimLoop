@@ -125,6 +125,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   now tests 3.11 to 3.14. Clean harness: `asyncio.Queue.shutdown()` (new in
   3.13) on 3.13.18 and 3.14.6. The redis-py harness also runs
   `BlockingConnectionPool` now (clean).
+- SQLAlchemy 2.1.9's asyncio engine (aiomysql driver, greenlets) runs
+  unmodified on the simulated MySQL server, which now answers `VERSION()`,
+  `@@variables` and `SHOW VARIABLES`. Clean under cancellation, pool
+  timeouts, pre-ping, resets and crashes.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

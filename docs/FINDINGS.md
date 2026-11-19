@@ -1297,6 +1297,20 @@ properties and fault mixes only.
   returned once nothing was unfinished (1000 seeds each, random, fifo and
   PCT, `strict_cancellation=True`). A mutated `shutdown()` that wakes no
   one fails 143 of 200 seeds.
+- **SQLAlchemy 2.1.9 asyncio engine (aiomysql 0.3.2 driver)**, [`findings/sqlalchemy_async_pool.py`](../findings/sqlalchemy_async_pool.py):
+  against the simulated MySQL server (which now answers the dialect's
+  startup queries), with `engine.connect()`/`engine.begin()` jobs, raw
+  `BEGIN`s left open, caller timeouts, `pool_timeout=0.02`,
+  `pool_pre_ping`, TCP resets and server crashes: replies always matched,
+  at most `pool_size + max_overflow` connections were open, no connection
+  was checked out while still in a server-side transaction, nothing stayed
+  checked out or hung, and `dispose()` closed every server session (100
+  seeds per workload, random and fifo, `strict_cancellation=True`).
+  SQLAlchemy uses its own pool, so the aiomysql pool bug above does not
+  apply. (A first version counted server-side sessions and flagged 4 open
+  with a limit of 3: an invalidated connection's slot is reused before the
+  server sees it close. That is network latency, not a leak; the harness
+  counts client connections instead.)
 - **aiomisc 18.0.40 (`@aggregate`)**, [`findings/aiomisc_aggregate.py`](../findings/aiomisc_aggregate.py):
   every caller that was not cancelled got its own result and no argument
   went through a completed batch twice, with random windows, `max_count`
