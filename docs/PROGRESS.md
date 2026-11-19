@@ -141,6 +141,12 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   leaving); shown with the `redis-stream://` backend, confirmed on plain
   asyncio, not reported. The simulated Redis server gained pub/sub and
   streams (`XADD`, `XINFO STREAM`, blocking `XREAD`).
+- pymongo 4.20's `AsyncMongoClient` runs unmodified on a new simulated
+  MongoDB server (`findings/_mongo.py`, OP_MSG); SimLoop now simulates
+  `fcntl.fcntl` on virtual sockets, which pymongo calls on every new
+  socket. Pool, replies and recovery clean under timeouts, resets and
+  crashes. Suspected: a `getMore` cut by a client-side timeout leaves its
+  server cursor open (pymongo skips the matching CSOT spec test).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

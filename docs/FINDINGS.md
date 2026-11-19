@@ -1342,6 +1342,45 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** nothing found in Kludex/uvicorn issues or PRs about
   waiting for cancelled tasks before the lifespan shutdown. Not reported.
 
+### pymongo 4.20.0: a `getMore` cut by a client-side timeout leaves its server cursor open
+
+- **Library:** [pymongo](https://pypi.org/project/pymongo/) 4.20.0
+  (latest release), `AsyncMongoClient`; the synchronous `Cursor` has the
+  same code (it is generated from the async one) but was not run here.
+- **Reproduction:** [`findings/pymongo_async_pool.py`](../findings/pymongo_async_pool.py)
+  (`cursor_after_timeout()`, plus the cursor check in the pool harness),
+  against the simulated MongoDB server in `findings/_mongo.py`.
+- **Seeds:** one cursor, `batch_size=2`, a server that answers `getMore`
+  after 0.2 s, and a 0.1 s limit, then `await cursor.close()`:
+  `asyncio.wait_for` raises `TimeoutError` and `close()` sends
+  `killCursors` (no server cursor left); `pymongo.timeout(0.1)` and
+  `socketTimeoutMS=100` raise `NetworkTimeout` and `close()` sends nothing,
+  leaving the cursor open on the server. Deterministic (seed 0). In the
+  pool harness, server cursors the client had received were left open in
+  11 of 100 runs with `pymongo.timeout()` jobs and 26 of 100 with 0.3% TCP
+  resets (first seed 1 for both, default scheduler), and in none without
+  faults or with `wait_for` timeouts.
+- **What happens:** `AsyncCursor._send_message` handles `ConnectionFailure`
+  (which `NetworkTimeout` subclasses) by setting `self._killed = True`
+  before `close()`, and `_prepare_to_die` skips `killCursors` for a killed
+  cursor. Every other exception, including `CancelledError`, goes through
+  `close()` with the cursor id intact.
+- **Why it is only suspected:** the CSOT specification says that when a
+  cursor times out client-side "it's imperative that drivers make a
+  good-faith effort to close the server-side cursor", and its spec test
+  "timeoutMS is refreshed for close" (a `getMore` blocked past `timeoutMS`,
+  then `close()`, expecting `killCursors`) is this case. pymongo's unified
+  test runner skips that file ("CSOT not implemented for cursors"), so the
+  gap is known to the maintainers in that sense. Whether the server cursor
+  survives depends on the server: the simulated server keeps a
+  non-exhausted cursor after its connection closes, which is what I expect
+  of `mongod` for a `getMore` that completes after the client gave up, but
+  that was not checked against a real server here. Where it does survive
+  it lasts until the server's idle cursor timeout (10 minutes by default).
+  For a reset connection, treating the cursor as dead is a long-standing,
+  apparently deliberate choice.
+- **Not reported.**
+
 ## False positives
 
 ### aiolimiter 1.3.0: `AsyncLimiter` spins at a fixed instant
@@ -1460,6 +1499,20 @@ properties and fault mixes only.
   with a limit of 3: an invalidated connection's slot is reused before the
   server sees it close. That is network latency, not a leak; the harness
   counts client connections instead.)
+- **pymongo 4.20.0 `AsyncMongoClient`**, [`findings/pymongo_async_pool.py`](../findings/pymongo_async_pool.py):
+  unmodified against the simulated MongoDB server in `findings/_mongo.py`
+  (OP_MSG, standalone, polled monitoring), `maxPoolSize=2`, five workers
+  doing inserts with read-back, cursor iteration (stopping early and
+  closing) and `find_one_and_update`, under `wait_for` timeouts,
+  `pymongo.timeout()`, 0.3% TCP resets and server crashes. Every reply
+  matched its request, the pool never had more than two connections (CMAP
+  events), no worker hung, nothing stayed checked out, the client served
+  a query once faults stopped and `close()` closed every server
+  connection; 100 seeds per workload, random and fifo,
+  `strict_cancellation=True`. Its checkout path restores counters on any
+  `BaseException`. Running it needed `fcntl.fcntl` on simulated sockets in
+  SimLoop (pymongo sets close-on-exec itself). The cursor cleanup gap is a
+  suspected issue above.
 - **aiomisc 18.0.40 (`@aggregate`)**, [`findings/aiomisc_aggregate.py`](../findings/aiomisc_aggregate.py):
   every caller that was not cancelled got its own result and no argument
   went through a completed batch twice, with random windows, `max_count`

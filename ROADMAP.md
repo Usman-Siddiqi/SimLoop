@@ -99,10 +99,11 @@ met; `docs/PROGRESS.md` has the session-by-session log.
       asyncpg, nats-py, circuitbreaker, aiocircuitbreaker, aiobreaker,
       purgatory, aiocron, APScheduler, pyrate-limiter, aio-throttle, aiochannel, arq, grpclib, aiomysql, asyncmy, aiomisc pool,
       generic-connection-pool, taskiq, SQLAlchemy asyncio, databases, tortoise-orm, broadcaster,
+      pymongo async,
       CPython asyncio primitives) (candidates: `aiokafka`-style
       clients)
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed (27 confirmed, 4 suspected,
-      2 false positives, 23 clean harnesses so far)
+      false positives, each with a reproduction script and seed (27 confirmed, 5 suspected,
+      2 false positives, 24 clean harnesses so far)
 - [x] README findings section lists only confirmed results
