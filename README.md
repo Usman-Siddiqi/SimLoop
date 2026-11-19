@@ -500,8 +500,10 @@ These are current, known gaps rather than design limits unless stated.
   swapping stand-in classes into `datetime` and into modules that imported
   the classes by name. A class reference stored anywhere else (a dict, a
   default argument) keeps the real clock. The simulated zone has a fixed
-  offset (no daylight-saving transitions), and `astimezone()` on a naive
-  `datetime` still converts with the machine's zone.
+  offset (no daylight-saving transitions). `TZ` is set to it for the run
+  (`Etc/GMT+5` for `utc_offset=-5`), which is what `tzlocal` and naive
+  `astimezone()` read; those need the system's zone database for offsets
+  other than 0.
 - `run_in_executor` and `to_thread` run the function inline (with blocking
   sleeps counted as its duration) instead of on a thread. Code that blocks a
   worker thread waiting for the event loop will deadlock.

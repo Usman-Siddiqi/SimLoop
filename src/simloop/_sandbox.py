@@ -148,6 +148,7 @@ class Sandbox:
         self._replacements: dict[int, object] = {}
         self._modules_before: frozenset[str] = frozenset()
         self._saved_env: dict[str, str] = {}
+        self._saved_tz: str | None = None
         self._random_state: tuple[Any, ...] | None = None
         self._bytes = random.Random(derive_seed(seed, "os.urandom"))
 
@@ -307,6 +308,13 @@ class Sandbox:
         if getattr(_local, "sandbox", None) is not None:
             raise RuntimeError("simulations cannot be nested")
         _install_audit_hook()
+        # Libraries that look up the local zone themselves (tzlocal, and the C
+        # library behind naive ``astimezone()``) read TZ: point it at the
+        # simulated zone too, before the time module's zone constants are
+        # patched (tzset rewrites them).
+        self._saved_tz = os.environ.get("TZ")
+        os.environ["TZ"] = _vdatetime.tz_variable(self.zone)
+        _tzset()
         inst: random.Random = random._inst
         self._random_state = inst.getstate()
         inst.seed(derive_seed(self.seed, "random"))
@@ -345,6 +353,23 @@ class Sandbox:
         self._saved.clear()
         if self._random_state is not None:
             random._inst.setstate(self._random_state)
+        if self._saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._saved_tz
+        _tzset()
+
+
+def _tzset() -> None:
+    if hasattr(time, "tzset"):
+        time.tzset()
+    # tzlocal caches the zone it found on first use; drop that so it reads
+    # TZ again (inside a run: the simulated zone; after it: the host's).
+    for name in ("tzlocal.unix", "tzlocal.win32"):
+        module = sys.modules.get(name)
+        for attr in ("_cache_tz", "_cache_tz_name"):
+            if module is not None and hasattr(module, attr):
+                setattr(module, attr, None)
 
 
 def active_sandbox() -> Sandbox | None:

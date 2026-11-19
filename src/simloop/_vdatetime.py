@@ -44,6 +44,20 @@ def fixed_zone(hours: float) -> _datetime.timezone:
     return _datetime.timezone(_datetime.timedelta(minutes=minutes), name)
 
 
+def tz_variable(zone: _datetime.timezone) -> str:
+    """A ``TZ`` value for ``zone``: an IANA name when one exists, else POSIX."""
+    offset = zone.utcoffset(None)
+    minutes = round(offset.total_seconds() / 60)
+    if minutes == 0:
+        return "UTC"
+    if minutes % 60 == 0:
+        # IANA's Etc zones have the sign inverted (POSIX style): UTC-05:00 is Etc/GMT+5.
+        return f"Etc/GMT{-minutes // 60:+d}"
+    west = -minutes
+    sign = "-" if west < 0 else ""
+    return f"<{zone.tzname(None)}>{sign}{abs(west) // 60}:{abs(west) % 60:02d}"
+
+
 def _local(timestamp: float) -> Any:
     return real_datetime.fromtimestamp(timestamp, _zone).replace(tzinfo=None)
 

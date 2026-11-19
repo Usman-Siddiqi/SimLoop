@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import sys
 import time
+import types
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -121,3 +123,38 @@ def test_same_seed_same_trace_with_an_offset() -> None:
     second = run_ok(local_views, seed=4, utc_offset=-3)
     assert first.digest == second.digest
     assert first.digest != run_ok(local_views, seed=4).digest
+
+
+def test_tz_variable_names_the_simulated_zone() -> None:
+    async def main() -> tuple[str, str, str]:
+        aware = datetime.datetime(2024, 6, 1, 12).astimezone()
+        return os.environ["TZ"], str(aware.utcoffset()), str(aware.tzname())
+
+    tz, offset, _name = run_ok(main, utc_offset=-5).value or ("", "", "")
+    assert tz == "Etc/GMT+5"
+    if os.path.exists("/usr/share/zoneinfo/Etc/GMT+5"):
+        assert offset == "-1 day, 19:00:00"
+    assert run_ok(main).value is not None
+    assert (run_ok(main).value or ("",))[0] == "UTC"
+    assert (run_ok(main, utc_offset=5.5).value or ("",))[0] == "<UTC+05:30>-5:30"
+
+
+def test_tz_variable_is_restored() -> None:
+    before = os.environ.get("TZ")
+    run_ok(local_views, utc_offset=2)
+    assert os.environ.get("TZ") == before
+
+
+def test_tzlocal_caches_are_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = types.ModuleType("tzlocal.unix")
+    fake._cache_tz = "Host/Zone"  # type: ignore[attr-defined]
+    fake._cache_tz_name = "Host/Zone"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tzlocal.unix", fake)
+
+    async def main() -> object:
+        seen = fake._cache_tz
+        fake._cache_tz = "Simulated"  # type: ignore[attr-defined]
+        return seen
+
+    assert run_ok(main, utc_offset=1).value is None
+    assert fake._cache_tz is None
