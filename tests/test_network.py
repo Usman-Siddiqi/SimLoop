@@ -628,3 +628,60 @@ def test_segments_in_flight_at_heal_stay_behind_held_ones() -> None:
         return received
 
     assert run_ok(main, scheduler="fifo").value == [b"first\n", b"second\n"]
+
+
+class SmallBuffers(asyncio.BufferedProtocol):
+    """Receives into a 3-byte buffer; optionally pauses after the first chunk."""
+
+    def __init__(self, pause_once: bool = False) -> None:
+        self.buffer = bytearray(3)
+        self.received = bytearray()
+        self.chunks: list[int] = []
+        self.pause_once = pause_once
+        self.done: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        self.transport: asyncio.Transport | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        assert isinstance(transport, asyncio.Transport)
+        self.transport = transport
+        transport.write(b"hello\n")
+
+    def get_buffer(self, sizehint: int) -> bytearray:
+        return self.buffer
+
+    def buffer_updated(self, nbytes: int) -> None:
+        self.chunks.append(nbytes)
+        self.received += self.buffer[:nbytes]
+        if self.pause_once and self.transport is not None:
+            self.pause_once = False
+            self.transport.pause_reading()
+            asyncio.get_running_loop().call_later(0.5, self.transport.resume_reading)
+        if self.received.endswith(b"\n"):
+            self.done.set_result(bytes(self.received))
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        pass
+
+
+@pytest.mark.parametrize("pause_once", [False, True])
+def test_buffered_protocol_receives_through_its_buffer(pause_once: bool) -> None:
+    async def main() -> tuple[bytes, list[int], float]:
+        net = simloop.network()
+        net.add_host("echo", entry=echo_server())
+        await asyncio.sleep(0.01)
+        loop = asyncio.get_running_loop()
+        protocol = SmallBuffers(pause_once)
+        transport, _ = await loop.create_connection(lambda: protocol, "echo", 7000)
+        started = loop.time()
+        reply = await protocol.done
+        transport.close()
+        return reply, protocol.chunks, loop.time() - started
+
+    result = run_ok(main)
+    assert result.value is not None
+    reply, chunks, elapsed = result.value
+    assert reply == b"echo hello\n"
+    assert chunks == [3, 3, 3, 2]
+    assert (elapsed >= 0.5) is pause_once
+    again = run_ok(main)
+    assert again.digest == result.digest

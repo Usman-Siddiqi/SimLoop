@@ -257,7 +257,8 @@ Hosts get their own address (`10.0.0.N`), tasks, ports and a `disk` dict
 that survives crashes. The standard asyncio APIs work over it unchanged:
 `open_connection`, `start_server`, `create_connection`,
 `create_datagram_endpoint`, `getaddrinfo`, and plain `socket.socket` objects
-used with `loop.sock_connect` (which is how aiohttp connects). The code that
+used with `loop.sock_connect` (which is how aiohttp connects). Stream
+protocols can be `asyncio.Protocol` or `asyncio.BufferedProtocol`. The code that
 runs before any host is added runs on the default host, `main`.
 
 ```python

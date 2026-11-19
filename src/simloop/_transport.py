@@ -360,19 +360,39 @@ class StreamTransport(asyncio.Transport):
         if protocol is None:
             return
         if kind == "data":
-            assert isinstance(protocol, asyncio.Protocol)
             self._network._record(
                 self._host.name, "recv", f"{self._incoming_label} {len(payload)}B"
             )
-            protocol.data_received(payload)
+            if isinstance(protocol, asyncio.BufferedProtocol):
+                self._fill_buffers(protocol, payload)
+            else:
+                assert isinstance(protocol, asyncio.Protocol)
+                protocol.data_received(payload)
         elif kind == "fin":
             self._eof_received = True
             if self._closing:
                 return
-            assert isinstance(protocol, asyncio.Protocol)
+            assert isinstance(protocol, (asyncio.Protocol, asyncio.BufferedProtocol))
             keep_open = protocol.eof_received()
             if not keep_open:
                 self.close()
+
+    def _fill_buffers(self, protocol: asyncio.BufferedProtocol, payload: bytes) -> None:
+        # Like asyncio's recv_into path: each get_buffer(-1) call takes as much
+        # as the buffer holds; the rest waits for the next call, or for
+        # resume_reading if the protocol paused the transport meanwhile.
+        view = memoryview(payload)
+        while view:
+            buffer = memoryview(protocol.get_buffer(-1)).cast("B")
+            if not len(buffer):
+                raise RuntimeError("get_buffer() returned an empty buffer")
+            size = min(len(buffer), len(view))
+            buffer[:size] = view[:size]
+            view = view[size:]
+            protocol.buffer_updated(size)
+            if view and (self._paused or self._closing):
+                self._pending.appendleft(("data", bytes(view)))
+                return
 
     def _lose(self, exc: Exception | None) -> None:
         if self._dead:

@@ -869,8 +869,10 @@ here. Rules (see `CLAUDE.md`):
   0-199 with the default scheduler (first seed 36) and on 9 with
   `scheduler="fifo", timer_jitter=0.001` (first seed 14); in each, a
   worker waits in `acquire()` while the pool holds 0 of 2 connections.
-  With `release` waking a waiter in those cases too, all 400 runs pass.
-  Every reply matched its token and the pool never exceeded `maxsize`.
+  With `release` waking a waiter in those cases too, all 400 runs pass, and
+  so does asyncmy 0.2.18 (whose pool notifies on every release) on the same
+  harness. Every reply matched its token and the pool never exceeded
+  `maxsize`.
 - **Property violated:** an `acquire()` waiting for a full pool gets a
   connection once the pool has room.
 - **Explanation:** `Pool.release` schedules `_wakeup()` (a `notify()` on
@@ -1152,3 +1154,10 @@ properties and fault mixes only.
   recovered after faults stopped and every server handler exited; 100
   seeds each with `random` and `fifo` plus 1 ms jitter. Calls without a
   deadline were left out (open issue #216 covers a hang there).
+- **asyncmy 0.2.18 (`Pool`)**, [`findings/aiomysql_pool_wakeup.py`](../findings/aiomysql_pool_wakeup.py):
+  the aiomysql pool harness (6 workers, `maxsize=2`, queries cancelled by
+  `wait_for`, transactions left open) against the simulated MySQL server:
+  every reply matched its query, the pool stayed within `maxsize` and every
+  worker finished; 200 seeds each with `random` and `fifo` plus 1 ms jitter.
+  Running it needed `asyncio.BufferedProtocol` support in SimLoop's
+  transports.

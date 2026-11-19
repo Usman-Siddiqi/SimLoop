@@ -16,6 +16,9 @@ waiter stays in ``Condition.wait()`` although the pool now has room, and
 nothing wakes it until some other connection is released normally: with
 no other traffic, never.
 
+asyncmy 0.2.18, whose pool notifies on every release, passes the same
+harness on every seed.
+
 Run: python findings/aiomysql_pool_wakeup.py
 """
 
@@ -23,11 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import aiomysql
+import asyncmy
 from _mysql import MysqlServer
+from asyncmy.errors import MySQLError as AsyncmyError
 from pymysql.err import MySQLError
 
 import simloop
@@ -35,14 +40,24 @@ import simloop
 MAXSIZE = 2
 
 
-async def harness() -> None:
-    """Every worker gets its connections and finishes."""
+def make_harness(library: str) -> Callable[[], Coroutine[Any, Any, None]]:
+    module: Any = aiomysql if library == "aiomysql" else asyncmy
+    errors = (TimeoutError, MySQLError, AsyncmyError)
+
+    async def harness() -> None:
+        """Every worker gets its connections and finishes."""
+        await run_workers(module, errors)
+
+    return harness
+
+
+async def run_workers(module: Any, errors: tuple[type[BaseException], ...]) -> None:
     net = simloop.network()
     net.add_host("db", entry=MysqlServer().serve)
     net.set_link("main", "db", latency=(0.0005, 0.003))
     await asyncio.sleep(0.01)
     rng = simloop.rng()
-    pool = await aiomysql.create_pool(
+    pool = await module.create_pool(
         host="db", user="u", password="p", db="d", minsize=0, maxsize=MAXSIZE, autocommit=True
     )
 
@@ -61,9 +76,9 @@ async def harness() -> None:
                             await asyncio.wait_for(query, rng.uniform(0, 0.05))
                         else:
                             await query
-                        rows = await cur.fetchall()
+                        rows = tuple(map(tuple, await cur.fetchall()))
                         assert rows == (("0", token),), f"{token} got {rows}"
-            except (TimeoutError, MySQLError) as exc:
+            except errors as exc:
                 simloop.log(f"{token}: {type(exc).__name__}")
             await asyncio.sleep(rng.uniform(0, 0.02))
 
@@ -140,6 +155,7 @@ async def plain(kind: str) -> tuple[bool, int]:
 def main() -> int:
     configs = [("random", simloop.SimConfig())]
     configs.append(("fifo", simloop.SimConfig(scheduler="fifo", timer_jitter=0.001)))
+    harness = make_harness("aiomysql")
     for name, config in configs:
         report = simloop.explore(harness, seeds=range(200), config=config)
         print(f"{name}: {report.summary()}")
@@ -153,6 +169,10 @@ def main() -> int:
             assert fixed.ok, fixed.summary()
     finally:
         undo()
+    for name, config in configs:
+        other = simloop.explore(make_harness("asyncmy"), seeds=range(200), config=config)
+        print(f"{name}, asyncmy: {other.summary()}")
+        assert other.ok, other.summary()
     for kind in ("cancelled query", "open transaction"):
         served, size = asyncio.run(plain(kind))
         print(
