@@ -1087,6 +1087,57 @@ here. Rules (see `CLAUDE.md`):
   has one issue ever, unrelated; its pull requests are the author's release
   merges ("fix: socket leak", #30, is in 0.8.1). Not reported.
 
+### 25. databases 0.9.0: a transaction that fails or is cancelled never gives its connection back
+
+- **Library:** [databases](https://pypi.org/project/databases/) 0.9.0
+  (latest release, March 2024), tested with the asyncmy 0.2.18 backend; the
+  code at fault is in `databases/core.py` and backend-independent.
+- **Reproduction:** [`findings/databases_transaction_leak.py`](../findings/databases_transaction_leak.py)
+  (the SimLoop harness, a patched `Transaction` as a control, and
+  plain-asyncio reproductions).
+- **Seeds:** `Database("mysql+asyncmy://...", max_size=2)` against the
+  simulated MySQL server; 5 workers run 8 `SELECT SLEEP(t), '<token>'`
+  queries each. Seeds 0-49, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`:
+  - without transactions, 30% of queries under a 0-30 ms `wait_for`, or
+    0.3% TCP resets per segment: all pass;
+  - the same inside `async with db.transaction()`: timeouts fail 47 / 43
+    runs (first seed 0 / 0), resets fail 36 / 38 (first seed 1 / 0): a pool
+    connection is still in use after every worker finished, or workers wait
+    for a connection for 60 s.
+
+  With `Transaction.start`, `commit` and `rollback` releasing the
+  connection in a `finally`, both transaction workloads pass all 100 runs.
+- **Property violated:** leaving `async with db.transaction()`, by any
+  path, returns the connection to the pool.
+- **Explanation:** `Transaction.commit()` and `rollback()` pop the
+  transaction off the connection's stack, await the driver's commit or
+  rollback, and only then call `Connection.__aexit__()`, which releases the
+  connection when its counter reaches zero. If the driver call raises (the
+  connection broke, or a cancelled query left it unusable) the release is
+  skipped: the pool loses the slot for good, and the task's `Connection`
+  (kept per task) keeps a counter that never returns to zero. `start()`
+  has the same shape: it increments the counter (acquiring the connection)
+  before awaiting `BEGIN`, and a cancellation or error there never undoes
+  it. As a side effect, a caller that times out inside a transaction gets
+  the driver's `InterfaceError` from the rollback instead of `TimeoutError`.
+
+  On plain asyncio with `max_size=1`: when the connection drops inside a
+  transaction (`OperationalError` 2006), when a 0.7 s `wait_for` expires
+  during a 1 s query inside one (the caller gets `InterfaceError: Cancelled
+  during execution`), and when a 0.1 s `wait_for` expires during a slow
+  `BEGIN` (`TimeoutError`), another task's query is not served within 1 s
+  afterwards.
+- **Impact:** high for applications using it: every request that times out
+  or loses its connection inside a transaction permanently removes a pool
+  connection, until the application stops serving.
+- **Feasibility:** deterministic on plain asyncio (the scripts above).
+- **Upstream status:** the commit/rollback half is known: open pull
+  request encode/databases#498 (2022), "Fix connection leak when
+  transaction commit/rollback raise an exception"; it does not mention
+  `start()` or cancellation. No release since 0.9.0. Rediscovered here from
+  a generic "no connection stays in use" check. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

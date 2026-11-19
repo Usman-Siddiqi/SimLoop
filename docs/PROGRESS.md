@@ -129,6 +129,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   unmodified on the simulated MySQL server, which now answers `VERSION()`,
   `@@variables` and `SHOW VARIABLES`. Clean under cancellation, pool
   timeouts, pre-ping, resets and crashes.
+- databases 0.9.0 (asyncmy backend): a transaction whose `BEGIN`, commit or
+  rollback raises or is cancelled never releases its connection (confirmed
+  on plain asyncio; the commit/rollback half is open PR #498; not
+  reported).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
