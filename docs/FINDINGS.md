@@ -146,6 +146,39 @@ here. Rules (see `CLAUDE.md`):
   achimnol/aiotools issues and pull requests for "uncancel", "cancelling",
   "move_on_after" and "timeout TaskScope" on 2026-11-18. Not reported.
 
+### 5. cashews 7.6.0: one caller's timeout cancels every concurrent caller
+
+- **Library:** [cashews](https://pypi.org/project/cashews/) 7.6.0 (latest
+  release on 2026-11-18; `thunder_protection` is unchanged on the upstream
+  default branch). Affects `@cache(...)`, `@cache.early(...)` and
+  `@cache.soft(...)`, which default to `protected=True`, with any backend.
+- **Reproduction:** [`findings/cashews_shared_cancel.py`](../findings/cashews_shared_cancel.py)
+  (plain-asyncio reproduction plus the SimLoop harness).
+- **Seeds:** 2 to 4 concurrent callers for one key, some under a random
+  `wait_for` timeout: with `SimConfig(strict_cancellation=True)` fails on 510
+  of seeds 0-999 with the default scheduler (first failing seed 1) and on
+  510 of 1000 with `scheduler="fifo"`.
+- **Property violated:** a caller that is not cancelled gets the value.
+- **Explanation:** `thunder_protection` starts the first call for a key as a
+  task and has every concurrent caller `await` that same task. Awaiting a
+  task directly propagates the awaiting caller's cancellation into it, so
+  when any one caller is cancelled (its `wait_for` timeout, a client
+  disconnect, a `TaskGroup` abort), the shared task is cancelled, every other
+  caller for that key raises `CancelledError`, and nothing is cached. On
+  plain asyncio, a caller with a 10 ms timeout and a caller with none, for a
+  100 ms function: the second caller gets `CancelledError` and
+  `cancelling()` on its task is 0 (nothing cancelled it).
+- **Feasibility:** deterministic once two callers overlap and one is
+  cancelled; reproduces with `asyncio.run` and fixed sleeps.
+- **How it was found:** spotted while reading `thunder_protection` for a
+  harness; SimLoop's `strict_cancellation` check (extended for this to flag
+  a `CancelledError` that came from another task's cancellation) finds it
+  from a harness with no cashews-specific assertion beyond "got the value".
+- **Upstream status:** no matching issue or pull request found in searches
+  of Krukov/cashews for "thunder_protection", "CancelledError", "cancel" and
+  "shield" on 2026-11-18 (#150 is about Redis timeouts under many cancelled
+  requests, with no root cause identified). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

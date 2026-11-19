@@ -94,11 +94,11 @@ met; `docs/PROGRESS.md` has the session-by-session log.
 - [ ] Harnesses for popular async libraries (done so far: aiojobs,
       async-lru, redis-py asyncio, aiorwlock, aiolimiter, aiocache, aiohttp,
       httpx/httpcore, websockets, anyio, uvicorn + Starlette, aiotools,
-      aiometer, asyncstdlib, CPython asyncio primitives) (candidates:
-      `cashews`, `tenacity`/`backoff` retry logic, `aiokafka`-style clients,
+      aiometer, asyncstdlib, cashews, CPython asyncio primitives)
+      (candidates: `tenacity`/`backoff` retry logic, `aiokafka`-style clients,
       `asyncpg`-style pools)
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed (4 confirmed, 3 suspected,
+      false positives, each with a reproduction script and seed (5 confirmed, 3 suspected,
       2 false positives, 10 clean harnesses so far)
 - [x] README findings section lists only confirmed results

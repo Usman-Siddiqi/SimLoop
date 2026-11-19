@@ -249,7 +249,7 @@ Inside a simulation:
 | `link` | `LinkConfig()` | Default link: latency 1 to 10 ms, no drops, duplicates or resets |
 | `connect_timeout` | `30.0` | How long a TCP connect keeps retrying an unreachable host |
 | `buggify` | `True` | Let `faults.buggify()` sites fire |
-| `strict_cancellation` | `False` | Fail when a task keeps running with a `cancel()` request nobody consumed (no matching `uncancel()`) and then finishes normally (below) |
+| `strict_cancellation` | `False` | Check that cancellation stays with the task it was meant for: leaked `cancel()` requests and `CancelledError`s that came from another task's cancellation (below) |
 
 ### Simulated network
 
@@ -381,15 +381,21 @@ fast until it is fixed. Options: `--simloop-seeds N`, `--simloop-start N`,
 | `step_limit` / `time_limit` | The run did not finish within its budget |
 | `nondeterminism` | Code touched a real socket, DNS, a thread or a subprocess |
 | `cancel_leak` | With `strict_cancellation=True`: a task finished normally with `cancelling()` still above zero after it had kept running |
+| `stray_cancel` | With `strict_cancellation=True`: a task ended with `CancelledError` from a task it awaited, although nothing called `cancel()` on it |
 
-`strict_cancellation` checks the bookkeeping that `asyncio.timeout()` and
-`TaskGroup` rely on since Python 3.11: whoever suppresses a cancellation it
-requested must call `uncancel()`. A leaked request makes a later `TaskGroup`
-in the same task treat the task as cancelled from outside (on 3.13+ the next
-`await` raises `CancelledError`). A task that takes a cancellation and ends
-in that same step, like a catch-all at the top of a request handler, is not
-flagged. It is off by default because code that swallows `CancelledError`
-on purpose trips it too.
+`strict_cancellation` checks two things. First, the bookkeeping that
+`asyncio.timeout()` and `TaskGroup` rely on since Python 3.11: whoever
+suppresses a cancellation it requested must call `uncancel()`. A leaked
+request makes a later `TaskGroup` in the same task treat the task as
+cancelled from outside (on 3.13+ the next `await` raises `CancelledError`).
+A task that takes a cancellation and ends in that same step, like a
+catch-all at the top of a request handler, is not flagged. Second, that one
+caller's cancellation does not kill another: awaiting a shared task directly
+cancels it when the awaiting caller is cancelled, and every other caller
+waiting on it then dies of a `CancelledError` nobody sent it. (Waking your
+own task by cancelling a private future, as aiohttp does, is not flagged.)
+It is off by default because code that swallows `CancelledError` on purpose
+trips it too; it ran clean on every other harness in `findings/`.
 
 Failures are grouped by a signature (failure kind, exception type and the
 source line it was raised from, or the property name), so 100 failing seeds
@@ -518,6 +524,7 @@ against the pinned versions.
 | [async-lru](https://pypi.org/project/async-lru/) | 2.4.0 | After `cache_invalidate`, the stale call's cleanup evicts the replacement entry, so the next call starts a duplicate execution ([script](findings/async_lru_replaced_entry.py)) | Already known upstream (open PRs #797, #807); rediscovered from a generic property |
 | CPython asyncio | 3.11.x | Cancelling a task while `wait_for` is cancelling its inner task after a timeout returns early; `async with cond` then releases another task's lock and a second task enters the critical section ([script](findings/cpython311_wait_for_lock.py)) | Fixed in 3.12 by the `wait_for` rewrite (GH-96764); rediscovered |
 | [aiotools](https://pypi.org/project/aiotools/) | 2.2.4 | An expired `TaskScope`/`move_on_after` timeout never calls `uncancel()`, so on Python 3.13+ a later failing `TaskGroup` in the same task also cancels the task ([script](findings/aiotools_scope_timeout.py)) | No matching upstream issue found; not reported |
+| [cashews](https://pypi.org/project/cashews/) | 7.6.0 | With the default `@cache(..., protected=True)`, one caller's timeout cancels the shared call, and every concurrent caller for the same key gets `CancelledError` ([script](findings/cashews_shared_cancel.py)) | No matching upstream issue found; not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests)

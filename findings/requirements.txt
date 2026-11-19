@@ -17,3 +17,4 @@ aiotools==2.2.4
 typing_extensions>=4.12
 aiometer==1.0.0
 asyncstdlib==3.14.0
+cashews==7.6.0
