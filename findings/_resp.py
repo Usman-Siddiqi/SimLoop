@@ -1,9 +1,10 @@
 """A small RESP2 server for driving Redis clients inside a simulation.
 
-It keeps strings and sorted sets with expiry on the (simulated) wall clock,
-and implements ``WATCH``/``MULTI``/``EXEC`` with Redis's semantics: a
-transaction is discarded if a watched key was written, deleted or expired
-after the ``WATCH``.
+It keeps strings, sorted sets and streams with expiry on the (simulated)
+wall clock, has pub/sub and a blocking ``XREAD``, and implements
+``WATCH``/``MULTI``/``EXEC`` with Redis's semantics: a transaction is
+discarded if a watched key was written, deleted or expired after the
+``WATCH``.
 """
 
 from __future__ import annotations
@@ -43,6 +44,11 @@ def encode(value: object) -> bytes:
     return b"$%d\r\n%s\r\n" % (len(data), data)
 
 
+def stream_id(raw: bytes) -> tuple[int, int]:
+    ms, _, seq = raw.decode().partition("-")
+    return int(ms), int(seq or 0)
+
+
 def format_score(score: float) -> str:
     if score in (float("inf"), float("-inf")):
         return "inf" if score > 0 else "-inf"
@@ -79,14 +85,16 @@ HELLO3 = (
 class Session:
     """Per-connection transaction state."""
 
-    def __init__(self) -> None:
+    def __init__(self, writer: asyncio.StreamWriter | None = None) -> None:
         self.watched: dict[bytes, int] = {}
         self.queued: list[list[bytes]] | None = None
         self.failed = False
+        self.writer = writer
+        self.channels: set[bytes] = set()
 
 
 class RespServer:
-    """Strings, sorted sets, expiry, transactions and the handshake commands.
+    """Strings, sorted sets, streams, expiry, transactions, pub/sub and the handshake.
 
     ``slow`` adds a random processing delay per command, which is what turns a
     client timeout into a late reply on a reused connection; ``delay`` adds a
@@ -103,9 +111,13 @@ class RespServer:
         self.expires: dict[bytes, float] = {}
         self.versions: dict[bytes, int] = {}
         self.log: list[list[bytes]] = []
+        self.subscribers: dict[bytes, set[Session]] = {}
+        self.streams: dict[bytes, list[tuple[bytes, list[bytes]]]] = {}
+        self.last_ids: dict[bytes, tuple[int, int]] = {}
+        self.stream_waiters: list[asyncio.Future[None]] = []
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        session = Session()
+        session = Session(writer)
         try:
             while (command := await read_command(reader)) is not None:
                 if self.resp3 and command[0].upper() == b"HELLO":
@@ -115,12 +127,115 @@ class RespServer:
                     await asyncio.sleep(simloop.rng().uniform(0, self.slow))
                 elif self.delay:
                     await asyncio.sleep(self.delay)
-                writer.write(encode(self.dispatch(session, command)))
+                frames = self.pubsub(session, command)
+                if frames is None and command[0].upper() == b"XREAD":
+                    frames = [await self.xread(command)]
+                if frames is None:
+                    frames = [self.dispatch(session, command)]
+                writer.write(b"".join(encode(frame) for frame in frames))
                 await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
         finally:
+            for channel in session.channels:
+                self.subscribers.get(channel, set()).discard(session)
             writer.close()
+
+    def pubsub(self, session: Session, command: list[bytes]) -> list[object] | None:
+        """SUBSCRIBE, UNSUBSCRIBE, PUBLISH, and PING while subscribed (RESP2 push frames)."""
+        name = command[0].upper()
+        if name == b"SUBSCRIBE":
+            frames: list[object] = []
+            for channel in command[1:]:
+                session.channels.add(channel)
+                self.subscribers.setdefault(channel, set()).add(session)
+                frames.append([b"subscribe", channel, len(session.channels)])
+            self.log.append(command)
+            return frames
+        if name == b"UNSUBSCRIBE":
+            channels = command[1:] or sorted(session.channels)
+            frames = []
+            for channel in channels:
+                session.channels.discard(channel)
+                self.subscribers.get(channel, set()).discard(session)
+                frames.append([b"unsubscribe", channel, len(session.channels)])
+            self.log.append(command)
+            return frames or [[b"unsubscribe", None, 0]]
+        if name == b"PUBLISH":
+            channel, data = command[1], command[2]
+            receivers = list(self.subscribers.get(channel, ()))
+            for receiver in receivers:
+                if receiver.writer is not None and not receiver.writer.is_closing():
+                    receiver.writer.write(encode([b"message", channel, data]))
+            self.log.append(command)
+            return [len(receivers)]
+        if name == b"PING" and session.channels:
+            return [[b"pong", b""]]
+        return None
+
+    async def xread(self, command: list[bytes]) -> object:
+        """``XREAD [COUNT n] [BLOCK ms] STREAMS key... id...``, waiting for an XADD if asked."""
+        self.log.append(command)
+        options = [a.upper() for a in command]
+        count = int(command[options.index(b"COUNT") + 1]) if b"COUNT" in options else None
+        block = int(command[options.index(b"BLOCK") + 1]) if b"BLOCK" in options else None
+        rest = command[options.index(b"STREAMS") + 1 :]
+        keys, ids = rest[: len(rest) // 2], rest[len(rest) // 2 :]
+        after = [
+            self.last_ids.get(k, (0, 0)) if i == b"$" else stream_id(i)
+            for k, i in zip(keys, ids, strict=True)
+        ]
+        deadline = (
+            None if block is None else asyncio.get_running_loop().time() + (block or 1e9) / 1000
+        )
+        while True:
+            found = []
+            for key, start in zip(keys, after, strict=True):
+                entries = [e for e in self.streams.get(key, []) if stream_id(e[0]) > start]
+                if entries:
+                    found.append([key, [[i, f] for i, f in entries[:count]]])
+            if found or deadline is None:
+                return found or NIL_ARRAY
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return NIL_ARRAY
+            waiter = asyncio.get_running_loop().create_future()
+            self.stream_waiters.append(waiter)
+            try:
+                await asyncio.wait_for(waiter, remaining)
+            except TimeoutError:
+                return NIL_ARRAY
+            finally:
+                if waiter in self.stream_waiters:
+                    self.stream_waiters.remove(waiter)
+
+    def xadd(self, key: bytes, args: list[bytes]) -> object:
+        if args[0] != b"*":
+            return Exception("only auto-generated stream IDs are supported")
+        ms = int(time.time() * 1000)
+        last = self.last_ids.get(key, (0, 0))
+        new = (ms, 0) if ms > last[0] else (last[0], last[1] + 1)
+        entry_id = f"{new[0]}-{new[1]}".encode()
+        self.last_ids[key] = new
+        self.streams.setdefault(key, []).append((entry_id, list(args[1:])))
+        waiters, self.stream_waiters = self.stream_waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        return entry_id
+
+    def xinfo_stream(self, key: bytes) -> object:
+        entries = self.streams.get(key)
+        if entries is None:
+            return Exception("no such key")
+        first = [entries[0][0], entries[0][1]] if entries else None
+        last = [entries[-1][0], entries[-1][1]] if entries else None
+        ms, seq = self.last_ids[key]
+        return [
+            b"length", len(entries), b"radix-tree-keys", 1, b"radix-tree-nodes", 2,
+            b"last-generated-id", f"{ms}-{seq}".encode(), b"groups", 0,
+            b"first-entry", first, b"last-entry", last,
+        ]  # fmt: skip
 
     def dispatch(self, session: Session, command: list[bytes]) -> object:
         name = command[0].upper()
@@ -215,7 +330,7 @@ class RespServer:
     COMMANDS = frozenset(
         b"PING ECHO GET SET SETEX PSETEX INCR INCRBY DEL EXISTS EXPIRE PEXPIRE PTTL KEYS DBSIZE"
         b" INFO ZADD ZREM ZSCORE ZINCRBY ZCARD ZRANGE ZRANGEBYSCORE ZREMRANGEBYSCORE"
-        b" CLIENT SELECT AUTH".split()
+        b" XADD XINFO CLIENT SELECT AUTH".split()
     )
 
     def known(self, name: bytes) -> bool:
@@ -318,6 +433,10 @@ class RespServer:
                 offset, count = int(args[3 + at + 1]), int(args[3 + at + 2])
                 ranked = ranked[offset:] if count < 0 else ranked[offset : offset + count]
             return self.listing(ranked, args[3:])
+        if name == b"XADD":
+            return self.xadd(args[0], args[1:])
+        if name == b"XINFO" and args[0].upper() == b"STREAM":
+            return self.xinfo_stream(args[1])
         if name in (b"CLIENT", b"SELECT", b"AUTH"):
             return "OK"
         if name == b"HELLO":
