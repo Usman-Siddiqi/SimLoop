@@ -1600,6 +1600,49 @@ here. Rules (see `CLAUDE.md`):
   repeated packets, and #401 / PR #402 added the retry this race is in.
   Not reported.
 
+### 35. aiocoap 0.4.17: concurrent block-wise responses from one resource get mixed
+
+- **Library:** [aiocoap](https://pypi.org/project/aiocoap/) 0.4.17 (latest
+  release), server `Resource` with its default `Block2Cache`, client
+  `Context.request`.
+- **Reproduction:** [`findings/aiocoap_block2_mixup.py`](../findings/aiocoap_block2_mixup.py)
+  (the SimLoop harness, a Request-Tag per request as the control, and a
+  plain-asyncio reproduction).
+- **Seeds:** an aiocoap server (`simplesocketserver`) and client
+  (`simple6`) over simulated UDP (1-20 ms latency); four tasks send six
+  POSTs each to one resource, which answers with the request's payload
+  repeated. Seeds 0-29, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`, `step_time=1e-6`. Clean with small answers under
+  10% loss, 10% duplication and `wait_for` cancellations (retransmission
+  and deduplication held: no handler ran twice), and with 2 KB answers
+  (two Block2 blocks) one request at a time under the same faults. With
+  2 KB answers and four tasks at once: 30 / 30 fail on both schedulers
+  with no fault injected. With a Request-Tag per request, all 60 pass,
+  under 5% loss and duplication as well.
+- **Property violated:** a response answers the request that asked for
+  it.
+- **Explanation:** `Block2Cache.extract_or_insert` stores the rendered
+  answer under `_extract_block_key`: the client's address, the request
+  code and its cache-key options. Two POSTs from one client to one
+  resource have the same key (the payload is not part of it), so the
+  second render replaces the first, and the first request's later
+  blocks are cut from the second request's answer. The server sends no
+  ETag with the cached answer, so the client's assembly check
+  (`ResourceChanged` on an ETag change) cannot notice. The client could
+  tell its operations apart with a Request-Tag (RFC 9175) but sets none.
+
+  On plain asyncio: two concurrent POSTs with payloads `A` and `B` to a
+  resource that answers with the payload 2000 times. The answer to `A`
+  comes back as 1024 `A` bytes followed by 976 `B` bytes.
+- **Impact:** high where it applies: a client that issues concurrent
+  requests to one resource silently gets a body assembled from another
+  request's answer.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** related open issues: #58 (2017, "Blockwise
+  transfers not queued if conflicting", about concurrent Block1 requests
+  to one resource) and #273 (Request-Tag for simultaneous requests not
+  implemented). No issue found for mixed Block2 answers. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

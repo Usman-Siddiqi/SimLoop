@@ -200,6 +200,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   broker also delivers at the subscription's QoS rather than the minimum.
   All confirmed on plain asyncio, not reported. Runs in its own
   environment (amqtt pins websockets 15).
+- aiocoap 0.4.17 over simulated UDP: retransmission and deduplication
+  clean under loss, duplicates and cancellations; concurrent requests to
+  one resource with multi-block answers get each other's blocks from the
+  server's Block2 cache (confirmed on plain asyncio; related to open
+  issues #58/#273; not reported). Framework change on the way: object
+  addresses (`0x7f...`) in task names and trace details are masked, since
+  aiocoap names its tasks after request reprs and replays diverged.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
