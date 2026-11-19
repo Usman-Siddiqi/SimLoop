@@ -1014,6 +1014,79 @@ here. Rules (see `CLAUDE.md`):
   (the only pool pull requests are the original implementation, #64, and
   #65, "pool fixes", both closed). Not reported.
 
+### 24. generic-connection-pool 0.8.1: the asyncio pool never disposes dead connections, leaks slots to cancelled acquires, and `close()` spins
+
+- **Library:** [generic-connection-pool](https://pypi.org/project/generic-connection-pool/)
+  0.8.1 (latest release), `generic_connection_pool.asyncio.ConnectionPool`.
+- **Reproduction:** [`findings/gcpool_leaks.py`](../findings/gcpool_leaks.py)
+  (the SimLoop harness, a patched pool as a control, and plain-asyncio
+  reproductions).
+- **Seeds:** a pool with `min_idle=1, max_size=2, total_max_size=4` hands
+  fake connections to 6 workers doing 10 acquire/use/release rounds each.
+  Seeds 0-49, default scheduler / `scheduler="fifo", timer_jitter=0.001`
+  (both with `step_time=1e-6`, see below):
+  - no faults, two endpoints, 30% failed connects, 10 ms acquire timeouts,
+    short idle and lifetime limits, and the background collector: all pass;
+  - aliveness checks that fail 10% of the time: 50 / 50 runs fail (first
+    seed 0 / 0): up to 10 connections are open at once, and connections are
+    still open after `close()`;
+  - two endpoints, 30% of rounds under a 0-20 ms `asyncio.wait_for`: 43 / 47
+    runs fail (first seed 0 / 0): every worker waits in `acquire()` for 60 s,
+    or slots are still acquired or reserved after every worker finished.
+
+  With the fixes below applied, both failing workloads pass all 100 runs.
+- **Property violated:** every connection the pool drops is disposed, at
+  most `total_max_size` connections exist, a cancelled acquire gives back
+  what it took, and `close(timeout)` closes every connection; its
+  documented `timeout` is the time "after which the pool closes all
+  connection despite they are released or not".
+- **Explanation:**
+  - When `check_aliveness()` returns `False`, `_acquire_connection` detaches
+    the connection, decrements the pool size and calls
+    `on_connection_dead()`, but never `dispose()`. The connection stays
+    open unless the manager's `on_connection_dead()` closes it, which the
+    documentation does not ask for and none of the bundled managers (socket,
+    SSL, Unix socket, psycopg2, asyncpg) does, and the pool, which no longer counts it, opens a
+    replacement.
+  - `_acquire_connection` undoes its bookkeeping in `except Exception`
+    blocks, and `CancelledError` is not an `Exception`. An acquire cancelled
+    during `check_aliveness()` leaves the connection in the endpoint's
+    acquired set; one cancelled during `create()` leaves the endpoint slot
+    reserved and the pool-wide size incremented (`_create_connection` has
+    the same `except Exception`). Each such cancellation removes a slot for
+    good; with `max_size` of them, every acquire waits until its timeout.
+  - `_close_connections` loops `while self._pools.get_size() != 0`, taking
+    only free connections. A connection that is held, or a slot leaked as
+    above, keeps the size above zero, so it loops without sleeping; the
+    timeout only bounds lock acquisition, so it eventually raises
+    `TimeoutError` with the held connections left open, and with no
+    timeout it never returns.
+
+  On plain asyncio with `max_size=1`: a connection whose check failed was
+  still open after `close()`; after one acquire cancelled during a 1 s
+  aliveness check, and after one cancelled during a 1 s connect, the next
+  acquire was not served within 1 s; `close(timeout=0.5)` with a connection
+  held used 0.48 s of CPU in 0.5 s and raised `TimeoutError` without closing
+  it, and `close()` used 0.99 s of CPU in its first second and did not
+  return.
+- **Impact:** moderate: connections that fail a health check leak (each an
+  open socket or database session), timed-out requests drain the pool
+  until it stops serving, and shutdown with a connection checked out burns
+  a core.
+- **Feasibility:** each is deterministic on plain asyncio (the scripts
+  above). `step_time=1e-6` is needed because the pool polls with
+  `Timer(0.0)`, which only expires once the clock has moved (`elapsed >
+  timeout`); a real clock always has.
+- **How it was found:** the harness first passed the idle and lifetime
+  workloads vacuously: `ConnectionInfo` stamps `created_at` with
+  `dataclasses.field(default_factory=time.monotonic)`, which kept the real
+  clock under simulation, so nothing ever expired. SimLoop now also swaps
+  clocks held in dataclass fields, class attributes, default arguments and
+  closures; the expiry workloads then ran for real (and pass).
+- **Upstream status:** the repository (dapper91/generic-connection-pool)
+  has one issue ever, unrelated; its pull requests are the author's release
+  merges ("fix: socket leak", #30, is in 0.8.1). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

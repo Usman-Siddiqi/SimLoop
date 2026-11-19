@@ -105,6 +105,20 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   four confirmed on plain asyncio, and a patched pool passes every
   workload; not reported).
 - The findings CI job runs in four shards.
+- **Captured clocks, wider**: besides module globals, the sandbox now swaps
+  time and entropy functions held in third-party classes' attributes,
+  dataclass `default_factory` fields (and the generated `__init__`'s
+  closure), default arguments and closures, and points late-imported ones
+  back at the real functions after the run. Found through
+  generic-connection-pool, whose `ConnectionInfo.created_at` kept the real
+  clock, so idle and lifetime expiry never fired under simulation.
+- generic-connection-pool 0.8.1 asyncio pool: connections that fail the
+  aliveness check are never disposed; acquires cancelled during the check
+  or the connect leak their slot (`except Exception` misses
+  `CancelledError`); `close()` busy-loops while anything is held and
+  ignores its timeout (all confirmed on plain asyncio, patched pool passes;
+  not reported). Failed connects, acquire timeouts, idle/lifetime expiry
+  and the background collector were clean.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
@@ -125,7 +139,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 249 tests.
+- 251 tests.
 
 ### In progress
 - Nothing half-done.
