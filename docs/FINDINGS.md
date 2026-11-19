@@ -465,6 +465,80 @@ here. Rules (see `CLAUDE.md`):
   2026-11-19; no matching report (#1307 is a different pool problem). Not
   reported.
 
+### 13. nats-py 2.17.0: `flush()` reports success during a reconnect, and `rtt()` raises `AssertionError`
+
+- **Library:** [nats-py](https://pypi.org/project/nats-py/) 2.17.0 (latest
+  release, 2026-11-17; `flush()` and `_send_ping()` are unchanged on the
+  upstream default branch), `nats.aio.client.Client`.
+- **Reproduction:** [`findings/nats_flush.py`](../findings/nats_flush.py)
+  (two plain-asyncio reproductions against a local server, plus the SimLoop
+  harness). The server is [`findings/_nats.py`](../findings/_nats.py), a
+  small NATS server (INFO/CONNECT, PING/PONG, SUB/UNSUB, PUB/HPUB,
+  MSG/HMSG, routing between connections) that keeps each connection's
+  commands in the order it processed them.
+- **Seeds:** a client with 4 workers, 10 operations each: requests (new
+  and old style, some under `wait_for`), `flush()` and `rtt()` under random
+  `wait_for` timeouts, and `publish` + `flush()` pairs; a second client
+  answers the requests and collects the publishes; 1% TCP resets and
+  random server crashes, `reconnect_time_wait=0.05`;
+  `strict_cancellation=True`. Of seeds 0-299, default scheduler: 28 fail
+  with a flush that succeeded during a reconnect (first seed 12), 4 with
+  the `rtt()` assertion (first seed 34), and 125 with the known ordering
+  issue below (first seed 0); `scheduler="fifo", timer_jitter=0.001`: 17
+  (first seed 29), 8 (first seed 74) and 139 (first seed 5). A run stops
+  at its first failure, so the commoner ordering issue hides some of the
+  others. Request/reply integrity, per-publisher ordering without
+  duplicates, and recovery after the faults held on every seed.
+- **Property violated:** `flush()` "sends a ping to the server expecting a
+  pong back ensuring what we have written so far has made it to the
+  server" (its docstring), else it raises a timeout; `rtt()` raises one of
+  nats-py's errors.
+- **Explanation:**
+  1. *flush during a reconnect.* `flush()` checks whether the read loop or
+     the flusher task has finished, and if so flushes the pending buffer
+     inline and returns without a PING. That fallback came with PR #853,
+     for tasks killed from outside (SIGINT handling on Python < 3.11). But
+     a reconnect cancels both tasks on purpose, so for the whole reconnect
+     `flush()` takes the fallback, `_flush_pending()` sees the client is not
+     connected and does nothing, and `flush()` returns success with the
+     data still in the client's buffer. If the client then reconnects the
+     data goes out later; if it gives up (`max_reconnect_attempts`) it is
+     never sent, after a `flush()` that said it was.
+  2. *rtt during an outage.* `rtt()` has no such check: it calls
+     `_send_ping`, which starts with `assert self._transport, "Client.connect
+     must be called first"`. After a failed reconnect attempt the client
+     holds a fresh, unconnected transport, which is falsy, so `rtt()`
+     raises a bare `AssertionError` (under `python -O` the assert is
+     skipped and the write fails with `AttributeError` on the missing
+     stream writer).
+  3. *Known upstream (#1085, open PR #1063):* `_send_ping` writes PING
+     straight to the socket while earlier commands still wait in the
+     pending buffer for the flusher task, so the PONG can come back before
+     the server has processed a PUB or SUB issued before `flush()`. The
+     simulation shows it when the PUB's segment is delayed behind the PING
+     (per-segment jitter, as with a lost and retransmitted segment); #1085
+     reproduces it against a real server.
+
+  On plain asyncio, with the only server gone and `max_reconnect_attempts=3`:
+  `publish()` then `flush(timeout=2)` returns in microseconds, the client
+  then closes after its reconnect attempts, and the message never reached
+  the server; `rtt(timeout=1)` called after the first failed attempt raises
+  `AssertionError: Client.connect must be called first`.
+- **Impact:** moderate for (1): code that uses `flush()` as a delivery
+  checkpoint (before acknowledging upstream work, before shutting down)
+  gets a false success during an outage. Low for (2): an unexpected
+  exception type from a health-check call during an outage.
+- **Feasibility:** both reproduce with `asyncio.run` over real localhost
+  sockets.
+- **Upstream status:** searched nats-io/nats.py issues and pull requests
+  on 2026-11-19 (flush with reconnect/reconnecting/outage, rtt,
+  `AssertionError`, the assertion text). Nothing matches (1) or (2):
+  #1061 and PR #1075 cover a PING written before CONNECT during a
+  reconnect, and PR #1063 reroutes `_send_ping` through the pending
+  buffer, but `flush()` returns before reaching `_send_ping` here; the
+  PR's diff could not be fetched to check further. (3) is #1085. Not
+  reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

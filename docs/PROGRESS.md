@@ -47,6 +47,17 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   holder"), and a caller cancelled during a failing release leaves a
   "Task exception was never retrieved" log (confirmed on real asyncio, not
   reported; low impact).
+- nats-py 2.17.0 under a NATS server simulator (`findings/_nats.py`):
+  `flush()` returns success at once during a reconnect (a fallback for
+  externally killed tasks also fires when a reconnect cancels them), so a
+  message can be lost after a successful flush; `rtt()` during an outage
+  raises a bare `AssertionError` (both confirmed on real asyncio, not
+  reported). The harness also rediscovers #1085 (PING written ahead of
+  queued commands). Request/reply and per-publisher ordering held.
+- Harness fix: `set_link(..., latency=...)` keeps earlier keyword settings,
+  so the redis-py and asyncpg harnesses kept injecting resets during their
+  recovery phase; they now pass `reset=0.0` (results unchanged), and the
+  `set_link` docstring says so.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.

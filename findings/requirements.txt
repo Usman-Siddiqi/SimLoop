@@ -32,3 +32,4 @@ psycopg-pool==3.3.3
 aio-pika==10.2.3
 aiologic==0.17.1
 asyncpg==0.32.0
+nats-py==2.17.0
