@@ -98,11 +98,11 @@ met; `docs/PROGRESS.md` has the session-by-session log.
       aiodataloader, strawberry-graphql DataLoader, aiomcache, coredis, psycopg-pool, aio-pika, aiologic,
       asyncpg, nats-py, circuitbreaker, aiocircuitbreaker, aiobreaker,
       purgatory, aiocron, APScheduler, pyrate-limiter, aio-throttle, aiochannel, arq, grpclib, aiomysql, asyncmy, aiomisc pool,
-      generic-connection-pool, taskiq, SQLAlchemy asyncio, databases, tortoise-orm,
+      generic-connection-pool, taskiq, SQLAlchemy asyncio, databases, tortoise-orm, broadcaster,
       CPython asyncio primitives) (candidates: `aiokafka`-style
       clients)
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed (26 confirmed, 4 suspected,
+      false positives, each with a reproduction script and seed (27 confirmed, 4 suspected,
       2 false positives, 23 clean harnesses so far)
 - [x] README findings section lists only confirmed results

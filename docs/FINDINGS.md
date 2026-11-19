@@ -1179,6 +1179,63 @@ here. Rules (see `CLAUDE.md`):
   failing-`BEGIN` trigger, the stale context variable and the hanging
   `close_connections()` are the same defect. Not reported.
 
+### 27. broadcaster 0.3.1: concurrent first subscribers to a channel lose one of them
+
+- **Library:** [broadcaster](https://pypi.org/project/broadcaster/) 0.3.1
+  (latest release, August 2024), shown with the shipped `redis-stream://`
+  backend over redis-py 8.1.0; the code at fault is `Broadcast.subscribe`
+  and backend-independent.
+- **Reproduction:** [`findings/broadcaster_subscribe_race.py`](../findings/broadcaster_subscribe_race.py)
+  (the SimLoop harness, a locked `subscribe` as a control, and a
+  plain-asyncio reproduction against a local `_resp.py` server).
+- **Seeds:** `Broadcast("redis-stream://...")` against the simulated Redis
+  server (which now has streams and a blocking `XREAD`). A publisher sends a
+  numbered message to channels `a` and `b` every 5 ms; subscribers enter
+  `broadcast.subscribe(ch)` four times each, wait for a message published
+  after they joined, and leave; one more stays on channel `keep`
+  throughout so the stream backend never runs out of streams (that is the
+  separate, known encode/broadcaster#149). Seeds 0-49, default scheduler /
+  `scheduler="fifo", timer_jitter=0.001`, `strict_cancellation=True`: one
+  subscriber per channel passes all runs; three per channel fails 50 / 50
+  (first seed 0 / 0), e.g. seed 0: `s0 round 0 on 'a': KeyError('a')`. With
+  the bookkeeping in `subscribe` held under one `asyncio.Lock`, all 100 runs
+  pass.
+- **Property violated:** every task inside `async with
+  broadcast.subscribe(ch)` receives what is published to `ch`, and leaves
+  without an exception of the library's making.
+- **Explanation:** `subscribe` checks `if not
+  self._subscribers.get(channel)`, awaits `self._backend.subscribe(channel)`,
+  and only then assigns `self._subscribers[channel] = {queue}`. A second
+  task that arrives during that await also sees no subscribers, subscribes
+  the backend again, and its assignment replaces the first task's set. The
+  first task's queue is in no set, so it never receives an event; whichever
+  of the two leaves second gets `KeyError` from the `finally` block, either
+  from `set.remove` or because the first to leave already deleted the
+  channel and unsubscribed the backend while the other was still inside.
+  Any backend whose `subscribe` waits on I/O is affected: redis-stream
+  (`XINFO STREAM`), Postgres (`LISTEN`; there the shared, unlocked asyncpg
+  connection additionally raises "another operation is in progress", known
+  as encode/broadcaster#22) and Kafka (waits for partition assignment), as
+  well as custom `BroadcastBackend`s. The plain `redis://` backend happens
+  not to suspend in `subscribe` once connected, so it does not show it.
+
+  On plain asyncio, with a 10 ms server delay: two tasks enter
+  `subscribe("news")` together and `"hello"` is published once both are
+  in. Result: `{'first': "got nothing, then KeyError('news')", 'second':
+  "got 'hello'"}`.
+- **Impact:** medium: the typical use is one subscription per WebSocket
+  client, so two clients joining a quiet channel within one round trip of
+  each other is ordinary; one of them silently receives nothing and both
+  can crash on disconnect.
+- **Feasibility:** deterministic on plain asyncio (the script above); it
+  needs only two tasks calling `subscribe` on the same new channel within
+  one backend round trip.
+- **Upstream status:** searched issues and pull requests for subscribe
+  races, `KeyError` and concurrency: #142 (open) reports a `KeyError` from
+  the same `finally` when the backend's `subscribe` raises, a different
+  trigger; #22 (open) is the Postgres connection sharing. No report of
+  this race found. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

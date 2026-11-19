@@ -136,6 +136,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - tortoise-orm 1.1.9: `in_transaction()` leaks its connection and leaves a
   stale context variable when `BEGIN` fails or is cancelled (rediscovers
   open issue #2391 / PR #2392).
+- broadcaster 0.3.1: two concurrent first subscribers to a channel
+  overwrite each other's registration (one hears nothing, `KeyError` on
+  leaving); shown with the `redis-stream://` backend, confirmed on plain
+  asyncio, not reported. The simulated Redis server gained pub/sub and
+  streams (`XADD`, `XINFO STREAM`, blocking `XREAD`).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
