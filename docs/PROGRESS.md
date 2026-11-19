@@ -181,6 +181,18 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   PyO3's cached type checks, for the rest of the process), dual-stack
   IPv6 UDP sockets see IPv4-mapped addresses, and
   `create_datagram_endpoint` returns after `connection_made`.
+- aiosmtplib 5.1.3 against aiosmtpd 1.4.6: a command cancelled while
+  waiting for its reply leaves the reply in flight, so the next command
+  takes it and an uncancelled send is refused with `503 nested MAIL`
+  (rediscovers a fix on main for 5.1.4, unreleased). Two network fidelity
+  fixes came out of it, each with a test: TCP data that has arrived
+  together comes back from one read (up to 256 KB), as from a real
+  socket, instead of one `data_received` per segment; and a reset that
+  arrives behind unread data or a FIN is delivered after them, as Linux
+  keeps received data readable and reports `ECONNRESET` on the next read.
+  The first harness version saw misdelivered mail that depended on the
+  old per-segment reads. Every findings script was re-run on the new
+  transport.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

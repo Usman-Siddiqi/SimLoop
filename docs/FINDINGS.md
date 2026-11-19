@@ -1486,6 +1486,53 @@ here. Rules (see `CLAUDE.md`):
   whose signatures have a fixed length; ECDSA signature lengths vary with
   OpenSSL's randomness, which SimLoop does not control.
 
+### 33. aiosmtplib 5.1.3: a cancelled command's late reply answers the next command (known upstream, fixed after the release)
+
+- **Library:** [aiosmtplib](https://pypi.org/project/aiosmtplib/) 5.1.3
+  (latest release), against an [aiosmtpd](https://pypi.org/project/aiosmtpd/)
+  1.4.6 server.
+- **Reproduction:** [`findings/aiosmtplib_cancel_desync.py`](../findings/aiosmtplib_cancel_desync.py)
+  (the SimLoop harness, a `read_response` that closes the connection when
+  cancelled as the control, and a plain-asyncio reproduction).
+- **Seeds:** one shared `aiosmtplib.SMTP` client; three tasks send six
+  messages each, each to its own recipient; the server takes 0-20 ms per
+  `RCPT` and `DATA`. Seeds 0-99, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`, `strict_cancellation=True`. Clean with no faults
+  and with 20 ms read timeouts. With 40% of sends under an outer
+  `asyncio.wait_for`: 37 / 100 fail (first seed 1) and 34 / 100 (first
+  seed 0), for example `SMTPRecipientsRefused: [SMTPRecipientRefused(503,
+  'Error: nested MAIL command', 'to-m1-0@b.test')]` on a send that nobody
+  cancelled. With the control, all 200 pass.
+- **Property violated:** a reply goes to the command that asked for it; a
+  send that is not cancelled fails only for its own reasons.
+- **Explanation:** cancelling a command while it waits for its reply
+  leaves the connection open (only a read timeout closes it), with the
+  reply still in flight. The next command reads that reply as its own,
+  and every reply after it is one command late: the next message's
+  `MAIL FROM` gets the cancelled `RCPT TO`'s `250`, its `RCPT TO` gets the
+  server's `503 nested MAIL`, so an uncancelled send is refused, and later
+  commands wait for replies that already came and time out.
+
+  On plain asyncio: a send cancelled by `wait_for` while its `RCPT` is
+  being answered, then two more sends: the second is refused with `503
+  Error: nested MAIL command`, the third raises `SMTPReadTimeoutError`,
+  and nothing is delivered.
+- **Impact:** medium: any timeout wrapped around `send_message` on a
+  connection that is reused breaks later sends on it.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** fixed on aiosmtplib's main branch for 5.1.4
+  (unreleased): "cancelling a command while waiting for its reply (e.g.
+  via asyncio.wait_for or asyncio.timeout) now closes the connection, so
+  the in-flight reply can no longer be paired with the next command
+  sent". Rediscovered from a generic "every message arrives once, intact"
+  check. Not reported.
+- **Harness note:** the first version of this harness also saw the next
+  message delivered inside the cancelled message's envelope. That needed
+  two `data_received` calls on one socket before the woken task ran,
+  which a real socket does not do when the data has already arrived
+  together; SimLoop now delivers such data in one read (see the progress
+  log), and only the refusal above remains.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
