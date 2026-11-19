@@ -133,6 +133,9 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   rollback raises or is cancelled never releases its connection (confirmed
   on plain asyncio; the commit/rollback half is open PR #498; not
   reported).
+- tortoise-orm 1.1.9: `in_transaction()` leaks its connection and leaves a
+  stale context variable when `BEGIN` fails or is cancelled (rediscovers
+  open issue #2391 / PR #2392).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

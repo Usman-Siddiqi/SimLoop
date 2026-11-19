@@ -1138,6 +1138,47 @@ here. Rules (see `CLAUDE.md`):
   `start()` or cancellation. No release since 0.9.0. Rediscovered here from
   a generic "no connection stays in use" check. Not reported.
 
+### 26. tortoise-orm 1.1.9: `in_transaction()` leaks its connection when `BEGIN` fails or is cancelled
+
+- **Library:** [tortoise-orm](https://pypi.org/project/tortoise-orm/) 1.1.9
+  (latest release), MySQL backend with asyncmy 0.2.18; the code at fault
+  (`TransactionContextPooled`) is shared by the pooled backends.
+- **Reproduction:** [`findings/tortoise_transaction_leak.py`](../findings/tortoise_transaction_leak.py)
+  (the SimLoop harness, a guarded `begin()` as a control, and plain-asyncio
+  reproductions).
+- **Seeds:** `maxsize=2` against the simulated MySQL server; 5 workers run
+  8 `SELECT SLEEP(t), '<token>'` queries each, each in its own task. Seeds
+  0-49, default scheduler / `scheduler="fifo", timer_jitter=0.001`: without
+  transactions, timeouts and 0.3% TCP resets both pass; inside
+  `in_transaction()`, timeouts fail 29 / 18 runs (first seed 0 / 0) and
+  resets 15 / 13 (first seed 0 / 9): a pool connection is still in use after
+  every worker finished, or workers wait 60 s for one. With `begin()`
+  guarded (release the connection and reset the context variable on any
+  exception), all 200 transaction runs pass, so `BEGIN` is the only leaking
+  path.
+- **Property violated:** leaving `in_transaction()`, by any path, returns
+  the connection to the pool.
+- **Explanation:** `TransactionContextPooled.__aenter__` acquires a pool
+  connection, points the `connections` context variable at the
+  transaction, and awaits `begin()` with nothing around it. If `BEGIN`
+  raises (the connection dropped) or the task is cancelled during it,
+  `__aenter__` fails, so `__aexit__`, which releases the connection and
+  resets the context variable, never runs. On plain asyncio with
+  `maxsize=1`, after a 0.1 s timeout during a slow `BEGIN`, and after the
+  connection drops on `BEGIN`: the failed task still sees a
+  `TransactionWrapper` as its `default` connection, another task's query is
+  not served within 1 s, and `Tortoise.close_connections()` does not return
+  within 1 s (it waits for the lost connection).
+- **Impact:** high under request deadlines: each deadline that lands in a
+  `BEGIN` round trip loses a connection for good (the ORM uses
+  `in_transaction()` internally too, e.g. `get_or_create`).
+- **Feasibility:** deterministic on plain asyncio (the scripts above).
+- **Upstream status:** known: open issue tortoise/tortoise-orm#2391
+  (2026-11-01, cancellation during `begin()`), fix in open PR #2392.
+  Rediscovered here from a generic "no connection stays in use" check; the
+  failing-`BEGIN` trigger, the stale context variable and the hanging
+  `close_connections()` are the same defect. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
