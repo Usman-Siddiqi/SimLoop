@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import logging
 import re
 import sys
@@ -65,6 +66,19 @@ import simloop
 
 logging.getLogger("redis").setLevel(logging.CRITICAL)
 ERRORS = (RedisError, RedisClusterException, ConnectionError, OSError, TimeoutError)
+
+
+@dataclasses.dataclass(frozen=True)
+class Library:
+    """The client under test, so that forks (valkey-py) can reuse the harness."""
+
+    cluster: Any
+    node: Any
+    cluster_error: type[Exception]
+    errors: tuple[type[BaseException], ...]
+
+
+REDIS = Library(RedisCluster, ClusterNode, ClusterError, ERRORS)
 WORKLOADS: dict[str, dict[str, Any]] = {
     "no faults": {},
     "migrations, wait_for, aclose fixed": {"migrate": 0.8, "cancel": 0.3, "fix": ("aclose",)},
@@ -104,7 +118,9 @@ FAILING = {
 }
 
 
-def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None]]:
+def make_harness(
+    knobs: dict[str, Any], lib: Library = REDIS
+) -> Callable[[], Coroutine[Any, Any, None]]:
     async def harness() -> None:
         """Reads see possible writes, no TTL exhausted, closed clients leave nothing open."""
         rng = simloop.rng()
@@ -115,9 +131,9 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
             net.set_link("main", name, latency=(0.0005, 0.005))
         await asyncio.sleep(0.05)
 
-        def connect() -> RedisCluster:
-            return RedisCluster(
-                startup_nodes=[ClusterNode(name, 6379) for name in ("r0", "r1", "r2")],
+        def connect() -> Any:
+            return lib.cluster(
+                startup_nodes=[lib.node(name, 6379) for name in ("r0", "r1", "r2")],
                 protocol=2,
                 socket_timeout=1.0,
                 reinitialize_steps=knobs.get("steps", 5),
@@ -150,7 +166,7 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
                     await asyncio.sleep(rng.uniform(0.1, 0.5))
                     net.host(victim).restart()
 
-        async def step(client: RedisCluster, n: int, i: int, last: dict[bytes, set[bytes]]) -> None:
+        async def step(client: Any, n: int, i: int, last: dict[bytes, set[bytes]]) -> None:
             key = rng.choice(keys[n])
             token = f"{n}-{i}".encode()
             try:
@@ -178,10 +194,10 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
                 if got not in last[key] | unknown[key]:
                     wrong.append(f"{key!r}: read {got!r}, expected {sorted(last[key])}")
                 last[key] = {got}
-            except ClusterError as exc:
+            except lib.cluster_error as exc:
                 if "TTL exhausted" in str(exc):
                     wrong.append(f"{key!r}: {exc}")
-            except ERRORS:
+            except lib.errors:
                 pass
 
         async def worker(n: int) -> None:
@@ -189,7 +205,7 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
             batch = knobs.get("batch")
             for i in range(0, 80, batch or 80):
                 if batch:
-                    with contextlib.suppress(*ERRORS):
+                    with contextlib.suppress(*lib.errors):
                         async with connect() as client:
                             for j in range(i, i + batch):
                                 await step(client, n, j, last)
@@ -225,19 +241,19 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
     return harness
 
 
-def fix_aclose() -> Callable[[], None]:
+def fix_aclose(cluster: Any = RedisCluster) -> Callable[[], None]:
     """Close the nodes whenever asked, whatever the refresh flag says."""
-    original = RedisCluster.aclose
+    original = cluster.aclose
 
     async def aclose(self: Any) -> None:
         self._initialize = True
         await self.nodes_manager.aclose()
         await self.nodes_manager.aclose("startup_nodes")
 
-    RedisCluster.aclose = aclose  # type: ignore[method-assign]
+    cluster.aclose = aclose
 
     def undo() -> None:
-        RedisCluster.aclose = original  # type: ignore[method-assign]
+        cluster.aclose = original
 
     return undo
 
@@ -310,7 +326,7 @@ def open_sessions() -> int:
     return sum(1 for task in asyncio.all_tasks() if "RespServer.handle" in repr(task.get_coro()))
 
 
-async def plain(port: int, scenario: str) -> str:
+async def plain(port: int, scenario: str, lib: Library = REDIS) -> str:
     """On a real loop: a cluster on localhost, then aclose() after an error or a MOVED."""
     names = ["a", "b", "c"]
     cluster = Cluster(names, addresses={n: ("127.0.0.1", port + i) for i, n in enumerate(names)})
@@ -319,7 +335,7 @@ async def plain(port: int, scenario: str) -> str:
         for name, node in cluster.nodes.items()
     }
     steps = 1 if scenario == "steps=1" else 5
-    client = RedisCluster(host="127.0.0.1", port=port, protocol=2, reinitialize_steps=steps)
+    client = lib.cluster(host="127.0.0.1", port=port, protocol=2, reinitialize_steps=steps)
     await client.initialize()
     keys = [f"k{i}".encode() for i in range(30)]
     for key in keys:
@@ -334,7 +350,7 @@ async def plain(port: int, scenario: str) -> str:
         try:
             await client.get(next(k for k in keys if cluster.owner[key_slot(k)] == "c"))
             outcome = "GET answered"
-        except RedisError as exc:
+        except lib.errors as exc:
             outcome = f"GET raised {type(exc).__name__}"
     elif scenario == "ask":
         key = keys[0]
@@ -351,7 +367,7 @@ async def plain(port: int, scenario: str) -> str:
         cluster.nodes[source].remove(key)
         try:
             outcome = f"GET answered {await client.get(key)!r}"
-        except RedisError as exc:
+        except lib.errors as exc:
             outcome = f"GET raised {type(exc).__name__}: {exc}"
         outcome += f" with {pooled} pooled connections; redirects {dict(cluster.redirects)}"
         cluster.migrating.pop(slot)
@@ -364,7 +380,7 @@ async def plain(port: int, scenario: str) -> str:
         for key in keys[:5]:
             try:
                 results.append((await client.get(key)).decode())
-            except RedisError as exc:
+            except lib.errors as exc:
                 results.append(str(exc))
         outcome = f"GETs of 5 moved keys: {results}"
     before = open_sessions()

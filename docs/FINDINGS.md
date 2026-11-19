@@ -1956,6 +1956,96 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** searched redis/redis-py issues and pull requests
   (#4015 is a different `ASK` failure); no match found. Not reported.
 
+### 44. valkey-py 6.2.0: the asyncio `ValkeyCluster` has redis-py's `aclose()`, `reinitialize_steps=1` and `ASKING` bugs (#41 to #43), unfixed
+
+- **Library:** [valkey](https://pypi.org/project/valkey/) 6.2.0 (latest
+  release; the cluster module on main differs only in a type annotation),
+  `valkey.asyncio.cluster.ValkeyCluster`, a fork of redis-py.
+- **Reproduction:** [`findings/valkey_cluster.py`](../findings/valkey_cluster.py),
+  which runs the harness and plain-asyncio scenarios of
+  [`findings/redis_cluster.py`](../findings/redis_cluster.py) with valkey's
+  classes.
+- **Seeds:** "migrations, reinitialize_steps=1" fails 30 / 30 runs under
+  the random scheduler and 30 / 30 under fifo with jitter (first seed 0
+  both), with `ClusterError: TTL exhausted.` (and some with connections
+  left open, as in #45). "slow migrations, aclose fixed" fails 29 / 30
+  random and 26 / 30 fifo; most of those are #45, 4 of the fifo ones are
+  "TTL exhausted" from the `ASKING` bug. With all fixes applied (the ones
+  in `redis_cluster.py`, adapted, plus #45's) the slow-migration workload
+  with pipelines and `wait_for`, and `reinitialize_steps=1`, pass 60 / 60
+  each.
+- **Explanation:** the same code as in redis-py 8.1.0:
+  1. `aclose()` does nothing while `_initialize` is set. valkey resets the
+     client (closing every node) on a connection error and at the
+     `reinitialize_steps`-th `MOVED`, so the window is narrower than in
+     redis-py: after the reset at the threshold, the command is retried
+     on the old nodes, which reconnect, and an `aclose()` before the next
+     command leaves those connections open.
+  2. At the threshold the `MOVED` handler resets but does not initialize,
+     so the retry uses the stale slot map; with `reinitialize_steps=1`
+     that repeats until "TTL exhausted". redis-py fixed this in #4322.
+  3. `ASKING` and the command are two `ClusterNode.execute_command`
+     calls, each taking a connection from a first-in-first-out pool.
+     valkey builds new nodes, with empty pools, on every refresh, which
+     hides the bug more often than in redis-py, but the plain repro is
+     the same.
+
+  On plain asyncio: after five `GET`s of moved keys, `aclose()` leaves 2
+  of 2 server connections open; with `reinitialize_steps=1` the first of
+  them raises "TTL exhausted"; a `GET` of a key that has already moved
+  in a migrating slot, with two idle connections to the importing node,
+  raises "TTL exhausted" after 8 `ASK` and 8 `MOVED` replies.
+- **Impact:** as in #41 to #43.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** searched valkey-io/valkey-py issues and pull
+  requests: nothing on `ASKING` or `reinitialize_steps`; #268 (merged)
+  stops `aclose()` from being undone by a later initialize, a different
+  problem. Rediscovered from redis-py (where two of the three are
+  fixed on master), not reported.
+
+### 45. valkey-py 6.2.0: a command in flight during a topology refresh reconnects a node the client has dropped, and that connection is never closed
+
+- **Library:** valkey 6.2.0, `valkey.asyncio.cluster.ValkeyCluster`.
+- **Reproduction:** [`findings/valkey_cluster.py`](../findings/valkey_cluster.py)
+  (workload "slow migrations, aclose fixed" and the controls with
+  "dropped nodes fixed").
+- **Seeds:** with `aclose()` fixed (#44), slow slot migrations leave
+  connections open after the client is closed in 29 / 30 runs under the
+  random scheduler (first seed 0, 5 connections) and 22 / 30 under fifo
+  with jitter (first seed 0, 7 connections), together with "Unclosed
+  ClusterNode object" warnings when the nodes are collected. With dropped
+  nodes disconnected again whenever a command on them finishes, the
+  migration, failover, reset and `wait_for` mix passes 60 / 60.
+- **Property violated:** once `aclose()` returns, the client holds no
+  connection.
+- **Explanation:** unlike redis-py, which keeps the existing `ClusterNode`
+  for an address across topology refreshes, `NodesManager.initialize`
+  builds a new `ClusterNode` for every address each time, swaps them in
+  and disconnects the old ones (since 6.2.0 it awaits that, the fix for
+  #185). A command that already holds an old node keeps using it: the
+  retry after the reset at the `MOVED` threshold picks nodes from the old
+  slot map, and a command redirected with `ASK` sends `ASKING` and then
+  the command to the node it looked up before. A connection connects
+  itself on its next send, so if that send, or the connect it is waiting
+  on, comes after the old node was disconnected, the old node ends up
+  with an open connection that nothing references. Neither `aclose()`
+  nor a later refresh reaches it; it stays open until garbage collection,
+  where `ClusterNode.__del__` reports it. Instrumenting the run shows the
+  reconnects on dropped nodes coming from `_execute_command` (the command
+  after `ASKING`, and the retry after `MOVED`).
+- **Impact:** low to medium: each topology refresh during traffic (slot
+  migrations, failovers) can strand a connection per in-flight command
+  until the garbage collector runs, plus the "Unclosed ClusterNode"
+  warning that #185 was about.
+- **Feasibility:** the interleaving needs another task's refresh to
+  complete while a command waits on the network (for the `ASKING` reply
+  or for a connect), which on a real loop is just two overlapping round
+  trips; it shows up under fifo scheduling with 1 ms timer jitter. Not
+  reproduced on plain asyncio separately.
+- **Upstream status:** related to #185 ("`Unclosed ClusterNode object`
+  error"), closed by #283 for the fire-and-forget disconnect; this path
+  remains on main. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

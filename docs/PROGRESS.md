@@ -246,6 +246,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean: coredis 6.9.0 `RedisCluster` against the same cluster (RESP3,
   `CONFIG GET` added to the simulator) under migrations, failovers,
   resets, cancellations and pipelines.
+- valkey-py 6.2.0 `ValkeyCluster` (redis-py fork) on the same harness,
+  which now takes the client library as a parameter: all three redis-py
+  cluster bugs are there, unfixed, and one of its own: topology refreshes
+  replace every `ClusterNode`, and a command in flight on an old node
+  reconnects it after it was disconnected, leaking that connection
+  (related to valkey-py #185). Confirmed (plain asyncio for the
+  inherited three, fifo for the leak), not reported.
 - Framework fixes found by that harness: a full garbage collection before
   each run (an earlier run's objects promoted to the oldest generation
   were finalized inside the next run, which made replays diverge), and a

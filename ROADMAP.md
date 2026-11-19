@@ -100,11 +100,11 @@ met; `docs/PROGRESS.md` has the session-by-session log.
       purgatory, aiocron, APScheduler, pyrate-limiter, aio-throttle, aiochannel, arq, grpclib, aiomysql, asyncmy, aiomisc pool,
       generic-connection-pool, taskiq, SQLAlchemy asyncio, databases, tortoise-orm, broadcaster,
       pymongo async, MCP Python SDK, python-socketio/engineio, asyncssh, aioquic, aiosmtplib, amqtt, aiocoap,
-      httpx/httpcore over HTTP/2, Hypercorn, asyncua, redis-py cluster,
+      httpx/httpcore over HTTP/2, Hypercorn, asyncua, redis-py cluster, coredis cluster, valkey-py cluster,
       CPython asyncio primitives) (candidates: `aiokafka`-style
       clients)
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
-      false positives, each with a reproduction script and seed (43 confirmed, 5 suspected,
+      false positives, each with a reproduction script and seed (45 confirmed, 5 suspected,
       2 false positives, 25 clean harnesses so far)
 - [x] README findings section lists only confirmed results
