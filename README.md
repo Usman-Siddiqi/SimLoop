@@ -16,7 +16,7 @@ It has already found a previously unreported bug in a popular aio-libs
 package ([Findings](#findings)).
 
 > Status: alpha. The core, network, faults, shrinking, CLI and pytest plugin
-> work and are tested on Python 3.11 to 3.13. See [ROADMAP.md](ROADMAP.md)
+> work and are tested on Python 3.11 to 3.14. See [ROADMAP.md](ROADMAP.md)
 > for what is next.
 
 ## Why deterministic simulation testing

@@ -39,7 +39,7 @@ At the end of every session:
   `simloop/__init__.py` exports; everything prefixed with `_` is internal.
 - Tooling: `ruff check`, `ruff format`, `mypy --strict` (configured in
   `pyproject.toml`), `pytest`. All four must pass before pushing; CI runs them
-  on 3.11 to 3.13.
+  on 3.11 to 3.14.
 - Commits: small, logical, Conventional Commits (`feat:`, `fix:`, `test:`,
   `docs:`, `refactor:`, `ci:`, `chore:`). Work directly on `main` (Usman's
   call: this is the only agent on the project) and push regularly.
