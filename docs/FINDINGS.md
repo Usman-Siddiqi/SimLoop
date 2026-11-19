@@ -1332,6 +1332,61 @@ here. Rules (see `CLAUDE.md`):
   "abandoned work is cancelled" and "the client recovers" checks. Not
   reported.
 
+### 30. python-engineio 4.15.1: a reset while a poll response is read leaves a client that says it is connected but never works again
+
+- **Library:** [python-engineio](https://pypi.org/project/python-engineio/)
+  4.15.1 (latest release), `AsyncClient` with the polling transport (its
+  aiohttp 3.14.5 session), used by `socketio.AsyncClient` from
+  [python-socketio](https://pypi.org/project/python-socketio/) 5.18.1;
+  server: `socketio.AsyncServer` as an ASGI app under uvicorn 0.54.0.
+- **Reproduction:** [`findings/engineio_polling_zombie.py`](../findings/engineio_polling_zombie.py)
+  (the SimLoop harness, a patched `_read_loop_polling` as the control, and
+  a plain-asyncio reproduction through a TCP relay that cuts one poll
+  response after its headers).
+- **Seeds:** three clients with reconnection enabled make ten
+  `call("echo", ...)` round trips each (server delay 0-30 ms); after faults
+  stop, every client that reports `connected` must answer a call within
+  5 s and the server must see exactly the clients' session ids. Seeds
+  0-49, default scheduler / `scheduler="fifo", timer_jitter=0.001`,
+  `strict_cancellation=True`. The websocket transport with 0.3% TCP resets
+  per segment, and polling without faults, all pass. Polling with 0.3%
+  resets: 12 / 9 fail (first seed 0 / 5), e.g. seed 0: `client 0 says it
+  is connected (engine.io state 'connected') but gets no reply ...; its
+  read loop ended with ClientPayloadError("Response payload is not
+  completed ... ConnectionResetError(104, ...)")`. With the control read
+  loop, all 100 pass.
+- **Property violated:** a client with reconnection enabled either works,
+  or reports that it is disconnected and reconnects.
+- **Explanation:** `AsyncClient._read_loop_polling` sends each long-poll
+  `GET` through `_send_request`, which turns aiohttp errors into a `None`
+  result that ends the loop cleanly. The body is then read outside it,
+  with `await r.read()` in a `try` that only catches `ValueError` (a
+  malformed payload). When the connection breaks after the response
+  headers arrived, `r.read()` raises `aiohttp.ClientPayloadError`, the read
+  loop task ends with that exception, and the code after the loop (stop
+  the write loop, fire `disconnect`, `_reset()`) never runs. The client
+  keeps `state == "connected"`, so `socketio.AsyncClient.connected` stays
+  `True` and reconnection never starts, while the server drops the session
+  at its ping timeout. Every later `emit` is queued for a write loop that
+  stopped, and every `call` times out. Catching `aiohttp.ClientError`
+  beside `ValueError` (handled the same way: queue `None`, leave the loop)
+  fixes it.
+
+  On plain asyncio: through a relay that ends one poll response one byte
+  into its body and aborts, 5 s later `client.connected` is `True`, a
+  `call` times out, the read loop task ended with `ClientPayloadError`, and
+  the server has no session.
+- **Impact:** high for clients that stay on polling (`transports=["polling"]`,
+  or where proxies block the websocket upgrade; by default a client polls
+  until the upgrade succeeds): one connection dropped mid-response, as
+  proxies and load balancers do, silently disables the client for good,
+  with no `disconnect` event to react to.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** searched issues and pull requests for
+  `ClientPayloadError`, "Response payload is not completed", polling read
+  loop and reconnect: nothing matching (#458 and #461 are other client
+  races). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

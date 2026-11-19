@@ -157,6 +157,12 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   response mode abandoned handlers keep running, and one TCP reset during
   a POST closes the client session (both rediscover open upstream
   issues #3762, #3522, #3560).
+- python-socketio 5.18.1 / python-engineio 4.15.1 (ASGI server under
+  uvicorn, `AsyncClient` over aiohttp): websocket transport clean under
+  resets; with the polling transport, a reset while a poll response body
+  is read kills the client's read loop without a disconnect, so it stays
+  "connected", never reconnects and every call times out (confirmed on
+  plain asyncio, not reported).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

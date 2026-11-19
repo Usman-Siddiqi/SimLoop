@@ -28,6 +28,8 @@ tortoise-orm==1.1.9
 broadcaster==0.3.1
 pymongo==4.20.0
 mcp==2.3.0
+python-socketio==5.18.1
+python-engineio==4.15.1
 tenacity==9.2.1
 backoff==2.2.1
 singleflight==0.1.3
