@@ -227,6 +227,22 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   missing message with an empty one; and a connection lost while a
   subscription is recreated leaves it monitoring nothing. Both confirmed
   on plain asyncio, not reported.
+- Simulated Redis Cluster (`findings/_resp_cluster.py`): `CLUSTER SLOTS`,
+  `COMMAND`, `MOVED`/`ASK`/`TRYAGAIN`, slot migrations key by key, and
+  replicas sharing their primary's keyspace for failovers. redis-py 8.1.0
+  `RedisCluster` (asyncio) against it: reads and writes consistent under
+  migrations, failovers, resets and cancellations; `aclose()` closes
+  nothing after a failed command or the `MOVED` threshold (fixed on
+  master after the release), and `reinitialize_steps=1` fails moved
+  commands with "TTL exhausted" (known, #4322). Both confirmed on plain
+  asyncio, not reported.
+- Framework fixes found by that harness: a full garbage collection before
+  each run (an earlier run's objects promoted to the oldest generation
+  were finalized inside the next run, which made replays diverge), and a
+  write after `close()` on a simulated TCP transport is dropped, as in
+  asyncio, instead of raising "Cannot call write() after write_eof()".
+  Note for direct script runs: harness code must not iterate sets of
+  strings (`PYTHONHASHSEED` is only pinned by the CLI).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

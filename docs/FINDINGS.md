@@ -1838,6 +1838,77 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** no matching issue found; `recreate` is unchanged
   on master. Not reported.
 
+### 41. redis-py 8.1.0: an asyncio `RedisCluster` closed after a failed command keeps its connections open (fixed after the release)
+
+- **Library:** [redis](https://pypi.org/project/redis/) 8.1.0 (latest
+  release), `redis.asyncio.cluster.RedisCluster`.
+- **Reproduction:** [`findings/redis_cluster.py`](../findings/redis_cluster.py)
+  (workload "failovers, a client per batch", its control with `aclose()`
+  fixed, and a plain-asyncio reproduction), against a simulated cluster
+  ([`findings/_resp_cluster.py`](../findings/_resp_cluster.py): three
+  primaries with synchronously replicated replicas, `MOVED`, `ASK` and
+  `TRYAGAIN`, slot migrations key by key, failovers).
+- **Seeds:** four tasks open a client per batch of four commands
+  (`async with RedisCluster(...)`) while primaries crash and their
+  replicas take over. Afterwards no TCP connection may be left open. 23 /
+  30 runs fail under the random scheduler (first seed 0, which leaves 23
+  connections open) and 19 / 30 under fifo with jitter, with connections
+  left open or with "Unclosed ClusterNode object" when a dropped client
+  is collected.
+  With `aclose()` fixed, all 60 pass, and so do migrations, failovers,
+  resets and `wait_for` cancellations on one shared client (120 runs): no
+  read returned a value that could not be the latest write.
+- **Property violated:** once `aclose()` returns, the client holds no
+  connection.
+- **Explanation:** `RedisCluster` uses one flag, `_initialize`, both for
+  "not connected" and for "refresh the topology before the next command".
+  A `ConnectionError` or timeout sets it, and so does every
+  `reinitialize_steps`-th `MOVED` (which closes the client, then retries
+  the command on the node the redirect named, reconnecting).
+  `aclose()` does nothing while the flag is set. A client closed after a
+  failed command, or right after the command that crossed the `MOVED`
+  threshold, keeps every connection it has; an `async with` block whose
+  last command failed leaks them all.
+
+  On plain asyncio (a cluster of three `_resp_cluster` nodes on
+  localhost): after a `GET` on a node that went away raises
+  `ConnectionError`, `aclose()` leaves 3 of 3 server connections open;
+  after five `GET`s of moved keys (the fifth crosses the threshold), it
+  leaves 2 of 2 open.
+- **Impact:** medium: connections (and server-side clients) leak in the
+  common "close the client on error" path, until garbage collection.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** fixed on master after the release: `aclose()` now
+  checks for a topology instead of the flag, with a comment describing
+  this case (apparently part of #4448, merged 2026-10-21). No issue found
+  for the leak itself. Not reported.
+
+### 42. redis-py 8.1.0: with `reinitialize_steps=1`, an asyncio `RedisCluster` command that meets a moved slot fails with "TTL exhausted" (known upstream, fixed after the release)
+
+- **Library:** redis 8.1.0, `redis.asyncio.cluster.RedisCluster`.
+- **Reproduction:** [`findings/redis_cluster.py`](../findings/redis_cluster.py)
+  (workload "migrations, reinitialize_steps=1", its control with the
+  fix of #4322, and a plain-asyncio reproduction).
+- **Seeds:** the harness of #41 with one shared client and slot
+  migrations. 26 / 30 runs fail under the random scheduler (first seed 0)
+  and 28 / 30 under fifo with jitter, with `ClusterError: TTL exhausted.`
+  With the fix, all 60 pass.
+- **Property violated:** a `MOVED` reply is followed transparently;
+  `reinitialize_steps=1` is documented as "reinitialize the cluster on
+  every MOVED error".
+- **Explanation:** at the threshold the `MOVED` handler calls `aclose()`
+  but does not initialize again, so the retry uses the stale slot map,
+  goes to the old owner, gets `MOVED` again, closes again, and so on
+  until the redirect budget (16) runs out. With `reinitialize_steps=1`
+  that happens on every `MOVED`. On plain asyncio: of five `GET`s of
+  moved keys, the first raises "TTL exhausted" (the next command
+  initializes first, so the rest succeed).
+- **Impact:** medium for clients configured that way: every topology
+  change fails commands.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** known: fixed by #4322 (merged 2026-09-24, after
+  8.1.0); rediscovered, not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
