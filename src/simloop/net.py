@@ -145,6 +145,16 @@ class Host:
         """This host's unfinished tasks, in creation order."""
         return [task for task in self._tasks if not task.done()]
 
+    @property
+    def connections(self) -> list[tuple[tuple[str, int], tuple[str, int]]]:
+        """This host's TCP connections not yet closed, as ``(local, remote)`` addresses.
+
+        Oldest first. A connection leaves the list once both directions have
+        ended or it was reset, so a check that nothing leaked can compare it
+        against what the code under test thinks is open.
+        """
+        return [(stream._local, stream._remote) for stream in self._streams]
+
     # -- faults ------------------------------------------------------------------
 
     def crash(self, *, power_loss: bool = False) -> None:

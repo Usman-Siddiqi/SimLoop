@@ -876,3 +876,24 @@ def test_data_arriving_together_comes_back_from_one_read() -> None:
         return reads
 
     assert run_ok(main).value == [b"one two ", b"three"]
+
+
+def test_hosts_list_their_open_connections() -> None:
+    async def main() -> None:
+        net = simloop.network()
+        net.add_host("db", entry=echo_server())
+        await asyncio.sleep(0.1)
+        reader, writer = await asyncio.open_connection("db", 7000)
+        writer.write(b"hi\n")
+        await reader.readline()
+        client_side = net.host("main").connections
+        server_side = net.host("db").connections
+        assert len(client_side) == 1
+        assert server_side == [(client_side[0][1], client_side[0][0])]
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(1)
+        assert net.host("main").connections == []
+        assert net.host("db").connections == []
+
+    run_ok(main)
