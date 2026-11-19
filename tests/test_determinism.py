@@ -6,7 +6,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +19,8 @@ CONFIG = simloop.SimConfig(timer_jitter=0.001)
 
 # Captured at import inside a container, where the sandbox does not look, so
 # it stays the real clock. (A plain module global would be swapped.)
-_REAL_CLOCK = {"perf_counter": time.perf_counter}
+# Kept in a dict, which the sandbox does not reach: real entropy during a run.
+_REAL = {"urandom": os.urandom}
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42, 2**40])
@@ -98,8 +98,8 @@ def test_identical_across_processes_and_hash_seeds() -> None:
 
 def test_explore_flags_code_that_leaks_real_time() -> None:
     async def leaky() -> None:
-        # A reference taken before the sandbox: wall-clock noise steers the run.
-        await asyncio.sleep((_REAL_CLOCK["perf_counter"]() * 1e6) % 1)
+        # A reference taken before the sandbox: real entropy steers the run.
+        await asyncio.sleep(int.from_bytes(_REAL["urandom"](4)) / 2**32)
         raise AssertionError("always fails")
 
     report = simloop.explore(leaky, seeds=range(3))
