@@ -539,6 +539,112 @@ here. Rules (see `CLAUDE.md`):
   PR's diff could not be fetched to check further. (3) is #1085. Not
   reported.
 
+### 14. circuitbreaker 2.1.3 and aiocircuitbreaker 2.0.0: a cancelled call counts as a success
+
+- **Library:** [circuitbreaker](https://pypi.org/project/circuitbreaker/)
+  2.1.3 (latest release; `__exit__` is unchanged on the upstream default
+  branch) and its asyncio fork
+  [aiocircuitbreaker](https://pypi.org/project/aiocircuitbreaker/) 2.0.0
+  (latest release, 2022), `CircuitBreaker.decorate` on a coroutine function.
+- **Reproduction:** [`findings/circuit_breakers.py`](../findings/circuit_breakers.py)
+  (a model-based harness shared by four breaker libraries, plus a
+  plain-asyncio reproduction for these two).
+- **Seeds:** 4 workers, 30 calls each, every call under a random
+  `wait_for` timeout (5-100 ms), a backend that switches between failing in
+  1-10 ms, hanging and working, `failure_threshold=3`,
+  `recovery_timeout=1`. "Once 3 calls in a row have failed, calls in the
+  next 0.5 s do not reach the backend" fails on seeds 4, 63, 74, 80 and 94
+  of 0-99 for both libraries in every simulated time zone; on 23 of seeds
+  0-499 with the default scheduler (first seed 4) and on 30 with
+  `scheduler="fifo", timer_jitter=0.001` (first seed 5). With `__exit__`
+  patched to ignore `CancelledError`, all 1000 pass.
+- **Property violated:** a circuit breaker counts failures and opens after
+  `failure_threshold` of them; a call that never completed is not evidence
+  that the backend works.
+- **Explanation:** the guarded call runs inside `with self:`, and
+  `__exit__` records a failure only for an exception matching
+  `expected_exception` (an `Exception` subclass) and calls `reset()` for
+  everything else. `CancelledError` is a `BaseException`, so when the
+  caller's timeout (`wait_for`, `asyncio.timeout`, a cancelled `TaskGroup`)
+  cancels a guarded call, the breaker resets: the failure count goes to 0
+  and the state to closed. Two consequences: a timeout in between failures
+  keeps the breaker from ever reaching the threshold, and a half-open trial
+  call that times out (the usual symptom of a backend that is still sick)
+  closes the circuit as if the trial had succeeded, sending full traffic
+  to the backend.
+
+  On plain asyncio: two failures open a breaker with `failure_threshold=2`;
+  after the recovery timeout it is half-open; the trial call, cancelled by
+  `wait_for(..., 0.05)` against a backend that hangs, leaves it `closed`.
+- **Feasibility:** reproduces with `asyncio.run`; the simulated failures
+  also occur under `fifo` with timer jitter.
+- **Upstream status:** searched fabfuel/circuitbreaker issues and pull
+  requests for cancel, timeout and half-open on 2026-11-19: #55 asks about
+  half-open behaviour (concurrent trial calls) and PR #71 adds consecutive
+  half-open successes, neither about cancellation. The aiocircuitbreaker
+  repository listed on PyPI could not be searched (the search API rejects
+  it). Not reported.
+
+### 15. aiobreaker 1.2.0: the reopen time mixes UTC and local time
+
+- **Library:** [aiobreaker](https://pypi.org/project/aiobreaker/) 1.2.0
+  (latest release, 2021; the same code is on the upstream default branch).
+- **Reproduction:** [`findings/circuit_breakers.py`](../findings/circuit_breakers.py),
+  run with `SimConfig(utc_offset=...)`.
+- **Seeds:** the harness of #14 passes on all 100 seeds with
+  `utc_offset=0` and fails on all 100 with `utc_offset=-5` ("reported a
+  time to reopen of 18000.99885 s (recovery timeout 1 s)") and with
+  `utc_offset=1` (`TypeError: unsupported operand type(s) for -:
+  'NoneType' and 'datetime.datetime'`), on the first rejection.
+- **Property violated:** a rejection reports when the breaker will try
+  again (`CircuitBreakerError.reopen_time`, `time_remaining`,
+  `CircuitBreaker.time_until_open`, `sleep_until_open`).
+- **Explanation:** `open()` stores `opened_at = datetime.utcnow()`, and the
+  open state's timeout check also uses `utcnow()`, so the breaker itself
+  reopens on time. But `opens_at` compares `opened_at + timeout` with
+  `datetime.now()`, local time, and `time_remaining`/`time_until_open`
+  subtract `datetime.now()`. West of UTC (UTC-5) the reopen time is five
+  hours late and `sleep_until_open()` sleeps five hours too long; east of
+  UTC (UTC+1) `opens_at` decides the timeout has already passed and returns
+  `None`, so the error carries `reopen_time=None` and `time_remaining`
+  raises `TypeError`. Only hosts running in UTC see correct values.
+
+  On plain asyncio with `TZ=America/New_York`, the first rejection's
+  `time_remaining` is `5:00:01.99`; with `TZ=Europe/Berlin` it raises the
+  `TypeError`.
+- **Impact:** low to moderate: code that backs off using the reported
+  time either stalls for hours or crashes, depending on the host's zone.
+- **Feasibility:** deterministic; depends only on the host's time zone.
+- **Upstream status:** arlyon/aiobreaker has 11 issues and 7 pull requests;
+  none mention time zones, `utcnow` or the reopen time (#2 added the
+  remaining time). Not reported.
+
+### 16. purgatory 3.0.2: every rejection grows the same exception's traceback
+
+- **Library:** [purgatory](https://pypi.org/project/purgatory/) 3.0.2
+  (latest release, 2026-11-11; `raise self` is unchanged on the upstream
+  default branch), `AsyncCircuitBreakerFactory`.
+- **Reproduction:** [`findings/circuit_breakers.py`](../findings/circuit_breakers.py).
+- **Seeds:** the harness of #14 fails on every seed of 0-99 in every
+  simulated zone: "a rejection's traceback has 50 frames", ten rejections
+  after the circuit opened.
+- **Property violated:** an exception raised to a caller describes that
+  call; memory use does not grow with the number of rejected calls.
+- **Explanation:** the open state is itself an exception (`class
+  OpenedState(State, Exception)`), and `handle_new_request` rejects a call
+  with `raise self`. Raising an exception instance again prepends the new
+  frames to its existing `__traceback__`, so every rejection while the
+  circuit is open adds five frames to the one shared object. Outside a
+  simulation, 2,000 rejections give a 10,000-frame traceback. The chain
+  keeps every frame, and their local variables, alive until the circuit
+  closes, and logging the exception prints all of it.
+- **Impact:** moderate under load: a busy service with a long `ttl`
+  accumulates frames (and the requests they reference) for every rejected
+  call while a dependency is down, which is when it can least afford it.
+- **Feasibility:** deterministic, on any event loop.
+- **Upstream status:** mardiros/purgatory has no issues and 62 pull
+  requests, none about this. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

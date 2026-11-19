@@ -54,6 +54,18 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   raises a bare `AssertionError` (both confirmed on real asyncio, not
   reported). The harness also rediscovers #1085 (PING written ahead of
   queued commands). Request/reply and per-publisher ordering held.
+- **Simulated time zone**: `SimConfig(utc_offset=hours)`. Local-time
+  functions (`time.localtime`, `mktime`, `strftime`, `ctime`, `asctime`, the
+  `time.timezone` constants, `datetime.now()`, `fromtimestamp()`,
+  `date.today()`) use a fixed simulated zone, UTC by default, so runs no
+  longer depend on the host's `TZ` (before, `datetime.now()` converted with
+  the host zone). A non-zero offset found the aiobreaker bug below.
+- Circuit breakers, one model-based harness for four libraries:
+  circuitbreaker 2.1.3 and aiocircuitbreaker 2.0.0 count a cancelled call as
+  a success (a timed-out half-open trial closes the circuit); aiobreaker
+  1.2.0 mixes `utcnow()` and `now()` in its reopen time; purgatory 3.0.2
+  re-raises one exception object per rejection, growing its traceback
+  (all confirmed, not reported).
 - Harness fix: `set_link(..., latency=...)` keeps earlier keyword settings,
   so the redis-py and asyncpg harnesses kept injecting resets during their
   recovery phase; they now pass `reset=0.0` (results unchanged), and the
@@ -61,7 +73,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 235 tests.
+- 242 tests.
 
 ### In progress
 - Nothing half-done.
