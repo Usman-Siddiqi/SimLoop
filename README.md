@@ -548,6 +548,7 @@ against the pinned versions.
 | [circuitbreaker](https://pypi.org/project/circuitbreaker/), [aiocircuitbreaker](https://pypi.org/project/aiocircuitbreaker/) | 2.1.3, 2.0.0 | A guarded call cancelled by the caller's timeout counts as a success: it resets the failure count, and a timed-out half-open trial call closes the circuit ([script](findings/circuit_breakers.py)) | No matching upstream issue found; not reported |
 | [aiobreaker](https://pypi.org/project/aiobreaker/) | 1.2.0 | The reopen time mixes `utcnow()` and `now()`: west of UTC it is hours late, east of UTC it is `None` and `time_remaining` raises `TypeError` (found with a simulated time zone) ([script](findings/circuit_breakers.py)) | No matching upstream issue found; not reported |
 | [purgatory](https://pypi.org/project/purgatory/) | 3.0.2 | Every rejected call re-raises the same exception object, so its traceback grows by five frames per rejection while the circuit is open ([script](findings/circuit_breakers.py)) | No upstream issues exist; not reported |
+| [aio-throttle](https://pypi.org/project/aio-throttle/) | 1.7.0 | A waiter that gives up stays counted as queued, so requests are rejected for a "full queue" that has room (and `LOW` priority is starved); `RandomRejectThrottleQuota` accepts with the reject probability ([script](findings/aio_throttle_queue.py)) | No matching upstream issue found; not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests;

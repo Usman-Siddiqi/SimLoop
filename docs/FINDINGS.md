@@ -645,6 +645,55 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** mardiros/purgatory has no issues and 62 pull
   requests, none about this. Not reported.
 
+### 17. aio-throttle 1.7.0: cancelled waiters still count as queued; the random-reject quota is inverted
+
+- **Library:** [aio-throttle](https://pypi.org/project/aio-throttle/) 1.7.0
+  (latest release, 2022; `internals.py` and `quotas.py` are unchanged on the
+  upstream default branch, anna-money/aio-throttle).
+- **Reproduction:** [`findings/aio_throttle_queue.py`](../findings/aio_throttle_queue.py)
+  (the SimLoop harness, a plain-asyncio reproduction and a direct check of
+  the quota).
+- **Seeds:** 6 workers, 15 requests each, random priorities, each request
+  under a random `asyncio.timeout` (5-200 ms), `Throttler(capacity_limit=2,
+  queue_limit=2)`, `strict_cancellation=True`. "A request is rejected for a
+  full queue only if `queue_limit` callers really wait (or, for `LOW`
+  priority, if any caller waits)" fails on 298 of seeds 0-299 with the
+  default scheduler (first seed 0) and on 299 with `scheduler="fifo",
+  timer_jitter=0.001` (first seed 0).
+- **Property violated:** `queue_limit` bounds how many callers wait for a
+  slot; a request is rejected for a full queue only when that many wait.
+- **Explanation:**
+  1. *Stale waiters.* `LifoSemaphore.acquire` appends a future to
+     `_waiters` and awaits it; a waiter that is cancelled (its caller's
+     timeout, a client disconnect) cancels its future but leaves it in the
+     list. `waiting` is `len(_waiters)`, and `Throttler._check_queue`
+     rejects when `waiting >= queue_limit` with no free slot, and rejects
+     every `LOW` priority request when `waiting > 0`. A release pops
+     futures from the top of the stack until it finds a live one, so stale
+     futures below a live waiter stay counted while the throttler is busy:
+     requests are turned away with `REJECTED_DUE_TO_FULL_QUEUE` while fewer
+     callers wait than the limit allows (and `stats.queue_size` reports
+     them). In the failing runs a request was rejected with 1 live waiter
+     and 2 counted.
+  2. *Inverted quota.* `RandomRejectThrottleQuota.can_be_accepted` returns
+     `self._random.random() < self._reject_probability`, which accepts with
+     the reject probability: `RandomRejectThrottleQuota(0.1)` rejected
+     89.6% of 10,000 requests. (Its constructor's error message also names
+     `MaxFractionCapacityQuota`.)
+
+  On plain asyncio: with `capacity_limit=1, queue_limit=1` and the slot
+  held, a second caller that waits 10 ms and is cancelled leaves the next
+  request rejected with "rejected due to full queue", with 0 live waiters
+  and 1 counted.
+- **Impact:** moderate for (1) in a server that uses the throttler as
+  admission control (its aiohttp middleware): after client timeouts it
+  sheds load it has room for, and starves `LOW` priority traffic. (2)
+  makes the quota do the opposite of its name.
+- **Feasibility:** both reproduce on plain asyncio.
+- **Upstream status:** anna-money/aio-throttle has 2 issues and 242 pull
+  requests (dependency bumps, CI, CODEOWNERS); none about either problem.
+  Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

@@ -65,6 +65,9 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   run. Clean harness: aiocron and APScheduler cron jobs across both 2024
   transitions (APScheduler's documented double run in the repeated hour
   aside); pyrate-limiter 4.5.1 rate windows under cancellation.
+- aio-throttle 1.7.0: cancelled waiters stay counted as queued, so
+  requests are rejected for a full queue that has room; its random-reject
+  quota is inverted (confirmed, not reported).
 - Circuit breakers, one model-based harness for four libraries:
   circuitbreaker 2.1.3 and aiocircuitbreaker 2.0.0 count a cancelled call as
   a success (a timed-out half-open trial closes the circuit); aiobreaker
