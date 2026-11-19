@@ -65,6 +65,20 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   run. Clean harness: aiocron and APScheduler cron jobs across both 2024
   transitions (APScheduler's documented double run in the repeated hour
   aside); pyrate-limiter 4.5.1 rate windows under cancellation.
+- The simulated Redis server (`findings/_resp.py`) now keeps sorted sets
+  and expiry on the simulated clock and implements `WATCH`/`MULTI`/`EXEC`
+  (a watched key that was written, deleted or expired aborts `EXEC`).
+  arq 0.28.0 under it: abort requests never expire (the cleanup range lies
+  in the future), so a job re-enqueued under an aborted id is aborted
+  before start; a shutdown while a job is claimed, starting or finishing
+  makes `Worker.run()` raise `CancelledError`, skips `on_shutdown` and
+  leaves the job locked for `job_timeout + 10` s (confirmed on plain
+  asyncio with SIGINT, not reported). arq pins `redis<6`, so CI runs any
+  `findings/<name>.py` that has a `findings/requirements-<name>.txt` in its
+  own environment (job `findings-isolated`).
+- Flaky test fixed: the "explore flags leaking real time" test used real
+  `perf_counter` noise, which can be 0 under coarse clock resolution (it
+  failed once on 3.12 in CI); it now uses real `os.urandom`.
 - aio-throttle 1.7.0: cancelled waiters stay counted as queued, so
   requests are rejected for a full queue that has room; its random-reject
   quota is inverted (confirmed, not reported). aiochannel 1.4.1: `put()`

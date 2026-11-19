@@ -1,0 +1,4 @@
+# arq requires redis<6, which conflicts with requirements.txt, so the findings
+# job runs arq_worker.py in its own environment.
+arq==0.28.0
+redis==5.3.1

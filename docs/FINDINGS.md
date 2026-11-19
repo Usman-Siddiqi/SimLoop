@@ -723,6 +723,100 @@ here. Rules (see `CLAUDE.md`):
   requests; #3 (an `InvalidStateError` during close) is fixed and nothing
   matches this. Not reported.
 
+### 19. arq 0.28.0: abort requests never expire; a shutdown mid-job locks the job and skips cleanup
+
+- **Library:** [arq](https://pypi.org/project/arq/) 0.28.0 (latest release;
+  `worker.py` is identical on the upstream default branch,
+  python-arq/arq), with redis-py 5.3.1 (arq requires `redis<6`).
+- **Reproduction:** [`findings/arq_worker.py`](../findings/arq_worker.py)
+  (two SimLoop harnesses against the simulated Redis server in
+  `findings/_resp.py`, plus plain-asyncio reproductions that run
+  `Worker.run()` against the same server on its own thread). It pins arq's
+  redis-py in `findings/requirements-arq_worker.txt`, which CI installs in a
+  separate environment. The harness applies redis-py's later fix to
+  `Pipeline.reset` (see the note below) so that bug does not mask arq's.
+- **Seeds:**
+  1. A worker with `allow_abort_jobs=True` and `keep_result=0` runs a job
+     with `_job_id="report"`; the client then calls `abort()` on it (which
+     returns `False`), waits 61-600 s and enqueues a new job with the same
+     id. "The new job runs" fails on all of seeds 0-19 with the default
+     scheduler and with `scheduler="fifo", timer_jitter=0.001`. With the
+     cleanup range corrected (`min=-inf, max=now_ms - 60_000`) it passes on
+     all 40.
+  2. Three workers (`max_jobs=2`) run 20 short jobs while one of them is
+     stopped and replaced every 0.1-1 s, the way arq stops on a signal.
+     "`Worker.close()` does not raise, and every job finishes within 30 s"
+     fails on 22 of seeds 0-99 with the default scheduler (first seed 0, a
+     job locked for 280 more seconds) and on 15 with `scheduler="fifo",
+     timer_jitter=0.001` (first seed 7, `close()` raised
+     `CancelledError`).
+- **Property violated:** (1) an abort request expires after
+  `abort_job_max_age` ("age of items in the abort_key sorted set after which
+  they're deleted"); (2) arq's documented "pessimistic execution": "If the
+  worker shuts down, the job will be cancelled immediately and will remain
+  in the queue to be run again when the worker starts up again (or run by
+  another worker which is still running)", and a clean shutdown runs
+  `on_shutdown`.
+- **Explanation:**
+  1. *Abort requests never expire.* `Job.abort()` adds the job id to the
+     `arq:abort` sorted set, scored with the current time in milliseconds.
+     Each poll, `_cancel_aborted_jobs` means to drop old entries but calls
+     `zremrangebyscore(abort_jobs_ss, min=timestamp_ms() + abort_job_max_age,
+     max=inf)`: the range lies in the future (and adds 60 to a millisecond
+     timestamp, where the constant is commented as seconds), so it never
+     matches. Entries only leave the set when a job with that id finishes.
+     An abort for a job that already finished, or was never found, stays
+     forever: a job enqueued later under the same `_job_id` is "aborted
+     before start", minutes or days later, and every worker reads the whole
+     growing set on every poll. On plain asyncio a real worker kept an
+     abort request scored ten minutes in the past after several polls.
+  2. *Shutdown mid-job.* On a signal, `handle_sig` cancels the worker's
+     tasks, and only the `wait_for` around the job function itself catches
+     the cancellation (to re-queue the job). Three other windows don't:
+     - cancelled while the reply to the `in-progress` claim
+       (`PSETEX arq:in-progress:<id>` in `start_jobs`) is on its way, the
+       worker never starts the job but leaves the claim in place;
+     - cancelled during the job's first round trip in `run_job` (`GET`
+       job, `INCR` retries), the job task raises `CancelledError` and also
+       leaves the claim (with the try counted);
+     - cancelled while the result is being recorded, inside
+       `asyncio.shield(self.finish_job(...))`, the job task raises
+       `CancelledError` and the recording task is left pending ("Task was
+       destroyed but it is pending!" when `run()` returns).
+
+     A job task that raised makes `Worker.close()` raise as well, since its
+     `asyncio.gather(*self.tasks.values())` re-raises: `Worker.run()` then
+     raises `CancelledError`, `on_shutdown` never runs, the pool is not
+     closed and the health-check key stays. A claim left in place stops
+     every worker from running the job until it expires, after
+     `job_timeout + 10` s (310 s by default).
+
+     On plain asyncio, `Worker.run()` with SIGINT sent while each reply is
+     in flight: during the claim, `run()` returned but the job was not run
+     and stayed claimed for 310 s; during the first round trip, `run()`
+     raised `CancelledError`, `on_shutdown` did not run, the health-check
+     key stayed and the job stayed claimed for 310 s; while recording the
+     result, `run()` raised `CancelledError` and `on_shutdown` did not run.
+- **Also seen (redis-py 5.3.1, fixed upstream):** `Pipeline.reset`, when
+  cancelled while reading its `UNWATCH` reply, catches only
+  `ConnectionError`, so the connection is never returned to the pool and
+  the pipeline is garbage-collected holding it ("Unclosed Pipeline client").
+  arq hits this when a worker stops during `start_jobs`. redis-py 8.1.0
+  handles the cancellation, but arq's `redis<6` pin keeps its users on the
+  old code. Not counted as an arq bug.
+- **Impact:** (1) moderate: re-enqueueing a job id after aborting it (for
+  example, to replace a job) silently cancels the new job, at any time
+  later; the set also grows without bound. (2) moderate: rolling restarts
+  (Kubernetes, deploys) stop workers while jobs start and finish all the
+  time; affected jobs are delayed by about five minutes by default (longer
+  with a larger `job_timeout`), and shutdown hooks do not run.
+- **Feasibility:** all of it reproduces on plain asyncio; (1) is
+  deterministic.
+- **Upstream status:** issue #485 ("How to safely re-enqueue an aborted
+  job?", open) reports the symptom of (1): a re-enqueued job is aborted
+  "if the aborted job is not found"; it does not identify the cause. Nothing
+  found for (2) (#343 is about workers that crash). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

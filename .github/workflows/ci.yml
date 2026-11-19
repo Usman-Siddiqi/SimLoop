@@ -55,8 +55,33 @@ jobs:
           PYTHONHASHSEED: "0"
         run: |
           for script in findings/[!_]*.py; do
+            stem=$(basename "$script" .py)
+            # Scripts with their own requirements run in the next job.
+            [ -e "findings/requirements-$stem.txt" ] && continue
             echo "::group::$script"
             python "$script"
+            echo "::endgroup::"
+          done
+
+  findings-isolated:
+    # Findings whose pinned versions conflict with requirements.txt.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Run each script in its own environment
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          for requirements in findings/requirements-*.txt; do
+            stem=${requirements#findings/requirements-}
+            stem=${stem%.txt}
+            echo "::group::findings/$stem.py"
+            python -m venv "/tmp/venv-$stem"
+            "/tmp/venv-$stem/bin/pip" install -q -e . -r "$requirements"
+            "/tmp/venv-$stem/bin/python" "findings/$stem.py"
             echo "::endgroup::"
           done
 
