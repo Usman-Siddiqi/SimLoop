@@ -19,7 +19,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   the cancelled future stays cached so later loads fail (confirmed, not
   reported). strawberry-graphql 0.341.2 `DataLoader`: the same spread,
   without the cache poisoning (known upstream, open PR #4803; rediscovered
-  by the generic check).
+  by the generic check). aiomcache 0.8.2: a cancelled command leaves its
+  reply for the next command on the pooled connection, and a connection
+  dropped mid-command strands a caller waiting in the pool (both fixed on
+  the upstream default branch, unreleased; rediscovered).
 - 232 tests.
 
 ### In progress

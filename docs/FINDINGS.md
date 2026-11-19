@@ -297,6 +297,50 @@ here. Rules (see `CLAUDE.md`):
   strawberry-graphql/strawberry#4803 (2026-11-10). Listed as a rediscovery
   by the generic check, not a new report.
 
+### 10. aiomcache 0.8.2: a cancelled command leaves its reply for the next one; a dropped connection strands pool waiters
+
+- **Library:** [aiomcache](https://pypi.org/project/aiomcache/) 0.8.2
+  (latest release on 2026-11-19, from May 2024), `Client` and
+  `MemcachePool`.
+- **Reproduction:** [`findings/aiomcache_cancel_desync.py`](../findings/aiomcache_cancel_desync.py)
+  (two plain-asyncio reproductions against a local memcached-protocol
+  server, plus two SimLoop harnesses against a simulated one).
+- **Seeds:** "a `get` of a worker's own key returns a value it may have
+  stored", 3 workers, 2 pooled connections, random client timeouts: fails
+  on 348 of seeds 0-999 with the default scheduler (first failing seed 2)
+  and on 328 with `scheduler="fifo", timer_jitter=0.001` (first seed 0).
+  "every request finishes" with 1-2 pooled connections and 5% or 20% TCP
+  resets per segment: deadlocks on 83 of seeds 0-999 (first seed 2) and on
+  96 with fifo plus jitter (first seed 14).
+- **Property violated:** a reply belongs to the command that asked for it,
+  and a caller waiting for a pooled connection gets one once the pool has
+  room.
+- **Explanation:** the `acquire` decorator around every command catches
+  `Exception` only, and always returns the connection to the pool. A
+  command cancelled after it was written but before its reply was read
+  (a `wait_for` timeout, a client disconnect) leaves that reply on the
+  connection; the next command on it reads it as its own, and every later
+  command reads the reply of the one before, until a reply fails to parse.
+  `get(key)` then returns `None` for a key that exists, or an older value of
+  the same key (the harness's `get(b'w2') returned b'2-4', stored {b'2-6'}`);
+  `add` and `delete` can report another command's outcome. Separately,
+  `MemcachePool.release` closes a connection whose reader hit EOF or an
+  error without putting anything in the queue, so a caller already waiting
+  in `acquire` on `Queue.get()` is never woken; when every connection is
+  lost that way, the waiter blocks forever although the pool size is 0. On
+  plain asyncio: after one `get(b"a")` times out, `get(b"b")` and the next
+  `get(b"a")` both return `None` with both keys stored; and with
+  `pool_size=1`, a second caller is still waiting 2 s after the first
+  caller's connection was dropped by the server.
+- **Feasibility:** both reproduce with `asyncio.run` and fixed sleeps over
+  real localhost sockets.
+- **Upstream status:** already known and fixed on the default branch, not
+  released. The reply mix-up is issue aio-libs/aiomcache#489, fixed by pull
+  request #510 (merged 2026-11-18); the default branch's `release` also
+  queues a `None` placeholder that wakes a waiter when it discards a
+  connection (no separate issue about the hang found). Listed as a
+  rediscovery; users of the PyPI release are still affected.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
