@@ -338,3 +338,47 @@ def test_strict_cancellation_accepts_well_behaved_code() -> None:
     for seed in range(20):
         result = simloop.run(main, seed=seed, config=config)
         assert result.ok, result.failure
+
+
+def test_strict_cancellation_flags_a_cancellation_from_a_shared_task() -> None:
+    async def main() -> None:
+        shared = asyncio.get_running_loop().create_task(asyncio.sleep(1.0))
+
+        async def impatient() -> None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(shared, 0.1)  # cancels `shared` on timeout
+
+        async def patient() -> None:
+            await shared
+
+        await asyncio.gather(impatient(), patient())
+
+    config = simloop.SimConfig(strict_cancellation=True)
+    result = simloop.run(main, config=config)
+    assert result.failure is not None
+    assert result.failure.kind == "stray_cancel"
+    assert "nothing called cancel() on it" in result.failure.message
+    assert "cancelled at t=0.1" in result.failure.message
+
+
+def test_strict_cancellation_ignores_cancelling_your_own_future() -> None:
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+
+        async def worker() -> None:
+            await waiter  # woken by cancelling the future, as aiohttp does
+
+        task = loop.create_task(worker())
+        await asyncio.sleep(0.1)
+        waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        other = loop.create_task(asyncio.sleep(1))
+        await asyncio.sleep(0)
+        other.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await other
+
+    result = simloop.run(main, config=simloop.SimConfig(strict_cancellation=True))
+    assert result.ok, result.failure

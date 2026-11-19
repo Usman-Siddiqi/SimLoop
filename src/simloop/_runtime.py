@@ -78,11 +78,13 @@ class SimConfig:
     buggify: bool = True
     """Let :func:`simloop.faults.buggify` sites fire."""
     strict_cancellation: bool = False
-    """Fail when a task finishes without being cancelled while ``cancelling()``
-    is still above zero: a ``cancel()`` that nothing matched with
-    ``uncancel()``, which makes a later ``asyncio.timeout`` or ``TaskGroup`` in
-    that task mistake it for a cancellation from outside. Libraries that leak
-    cancel requests (and code that swallows ``CancelledError``) trip it."""
+    """Check that cancellation stays with the task it was meant for. Fails a
+    run when a task finishes normally after running on with ``cancelling()``
+    above zero (a ``cancel()`` nothing matched with ``uncancel()``, which makes
+    a later ``asyncio.timeout`` or ``TaskGroup`` in that task mistake it for a
+    cancellation from outside), and when a task ends cancelled although
+    nothing called ``cancel()`` on it (a ``CancelledError`` from a shared task
+    or future that was cancelled on someone else's behalf)."""
 
     def replace(self, **changes: Any) -> SimConfig:
         return dataclasses.replace(self, **changes)
@@ -465,7 +467,7 @@ def _classify(exc: BaseException) -> Failure:
     if isinstance(exc, TimeLimitExceeded):
         return Failure("time_limit", str(exc), "time_limit", exc)
     if isinstance(exc, CancellationLeak):
-        return Failure("cancel_leak", str(exc), f"cancel_leak:{exc.coroutine}", exc)
+        return Failure(exc.kind, str(exc), f"{exc.kind}:{exc.coroutine}", exc)
     if isinstance(exc, NondeterminismError):
         return Failure("nondeterminism", str(exc), "nondeterminism", exc)
     message = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__

@@ -32,15 +32,21 @@ class InvariantViolation(SimulationError):
 
 
 class CancellationLeak(SimulationError):
-    """A task finished with cancellation requests nobody consumed.
+    """Cancellation crossed a task boundary it should not have.
 
-    Raised only with ``SimConfig(strict_cancellation=True)``.
+    ``kind`` is ``"cancel_leak"`` for a task that finished with cancellation
+    requests nobody consumed, or ``"stray_cancel"`` for a task that ended
+    cancelled although nothing called ``cancel()`` on it. Raised only with
+    ``SimConfig(strict_cancellation=True)``.
     """
 
-    def __init__(self, message: str, task_name: str, coroutine: str) -> None:
+    def __init__(
+        self, message: str, task_name: str, coroutine: str, kind: str = "cancel_leak"
+    ) -> None:
         super().__init__(message)
         self.task_name = task_name
         self.coroutine = coroutine
+        self.kind = kind
 
 
 class NondeterminismError(RuntimeError):
