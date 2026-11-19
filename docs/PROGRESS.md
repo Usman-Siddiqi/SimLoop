@@ -119,6 +119,8 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   ignores its timeout (all confirmed on plain asyncio, patched pool passes;
   not reported). Failed connects, acquire timeouts, idle/lifetime expiry
   and the background collector were clean.
+- Clean harness: taskiq 0.13.0's worker `Receiver` (concurrency and
+  prefetch limits, acks, graceful stop, task timeouts).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

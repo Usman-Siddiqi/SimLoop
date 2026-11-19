@@ -1277,6 +1277,13 @@ properties and fault mixes only.
   `task_limit` kept its bound and its order when `ordered=True`, and leaving
   a merged stream early (`break` or a timeout) closed every source. 1000
   seeds each with `random`, `pct` and `fifo` plus 1 ms jitter.
+- **taskiq 0.13.0 (worker `Receiver`)**, [`findings/taskiq_receiver.py`](../findings/taskiq_receiver.py):
+  with ackable deliveries, `max_async_tasks=3`, `max_prefetch` 0-3, task
+  `timeout` labels and a stop at a random time, at most `max_async_tasks`
+  tasks ran at once, unacked deliveries stayed within `max_async_tasks +
+  max_prefetch`, no task ran twice and no message was acked twice, every
+  finished task was acked, and a stop without `wait_tasks_timeout` waited for
+  every running task (200 seeds each, random and fifo).
 - **aiomisc 18.0.40 (`@aggregate`)**, [`findings/aiomisc_aggregate.py`](../findings/aiomisc_aggregate.py):
   every caller that was not cancelled got its own result and no argument
   went through a completed batch twice, with random windows, `max_count`

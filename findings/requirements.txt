@@ -21,6 +21,7 @@ cashews==7.6.0
 aiostream==0.8.2
 aiomisc==18.0.40
 generic-connection-pool==0.8.1
+taskiq==0.13.0
 tenacity==9.2.1
 backoff==2.2.1
 singleflight==0.1.3
