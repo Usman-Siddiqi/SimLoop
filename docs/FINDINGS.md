@@ -1719,6 +1719,39 @@ here. Rules (see `CLAUDE.md`):
   which describes this and the related missing backpressure.
   Rediscovered; not reported.
 
+### 38. amqtt 0.12.2: `disconnect()` during an automatic reconnect is ignored, and the client reconnects
+
+- **Library:** [amqtt](https://pypi.org/project/amqtt/) 0.12.2 (latest
+  release), `MQTTClient` with `auto_reconnect`.
+- **Reproduction:** [`findings/amqtt_qos2_resume.py`](../findings/amqtt_qos2_resume.py)
+  (the workloads ending in "disconnect", a `disconnect()` that stops the
+  reconnect as the control, and a plain-asyncio reproduction).
+- **Seeds:** the harness of #34; at the end the subscriber disconnects
+  as well, and the client host must have no TCP connection left (checked
+  with `Host.connections`). Clean with no faults. With 2% TCP resets per
+  segment: 11 / 40 runs fail (first seed 4) and 5 / 40 (first seed 1)
+  with a client still connected. With the control, all 80 pass. Found by
+  re-running every findings harness with a generic connection-leak probe.
+- **Property violated:** after `disconnect()` returns, the client is
+  disconnected and stays so.
+- **Explanation:** after a lost connection, `handle_connection_close`
+  calls `reconnect()`, and the session is "disconnected" until the new
+  connection is up. `disconnect()` in that window checks
+  `session.transitions.is_connected()`, logs "Client session not
+  connected, ignoring call" and returns, without touching the reconnect
+  in progress. The reconnect then completes; the client is connected
+  again, and after every later drop it reconnects once more, although the
+  application closed it.
+
+  On plain asyncio, against a scripted broker that drops the first
+  connection and answers the reconnect's CONNECT after 0.2 s:
+  `disconnect()` is called while the client is "disconnected"; a second
+  later the client is "connected" and the broker has one connection open.
+- **Impact:** medium: a client shut down during a reconnect keeps a
+  connection (and its session) alive for the life of the process.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** no matching issue found. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

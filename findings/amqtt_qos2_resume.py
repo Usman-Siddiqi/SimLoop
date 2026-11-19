@@ -32,6 +32,14 @@ only ordinary errors. It fails: when the connection drops while
 ``TaskGroup`` or ``gather`` take it for a cancellation. Raising an
 ordinary error there passes.
 
+Also checked: once the subscriber disconnects at the end, the client host
+has no connection left. With TCP resets it fails: a publisher that calls
+``disconnect()`` while it is reconnecting automatically gets "Client
+session not connected, ignoring call", and the reconnect then completes,
+so the client stays connected (and reconnects again after every drop)
+although the application closed it. Stopping the reconnect in
+``disconnect()`` passes.
+
 Noticed while writing the harness, and checked on a real loop: the broker
 delivers every message at the subscription's QoS, so a QoS 0 publish
 reaches a QoS 2 subscriber as QoS 2 ([MQTT-3.8.4-6] asks for the minimum
@@ -66,10 +74,13 @@ WORKLOADS: dict[str, dict[str, Any]] = {
     "no faults, publisher errors": {"own_errors": True},
     "TCP resets": {"reset": 0.02},
     "TCP resets, publisher errors": {"reset": 0.02, "own_errors": True},
+    "no faults, disconnect": {"closed": True},
+    "TCP resets, disconnect": {"reset": 0.02, "closed": True},
 }
 FAILING = {
     "TCP resets": "publish returned",
     "TCP resets, publisher errors": "CancelledError in a task nobody cancelled",
+    "TCP resets, disconnect": "still connected after disconnect()",
 }
 CLIENT = {"auto_reconnect": True, "reconnect_retries": -1, "reconnect_max_interval": 1}
 URI = "mqtt://u:pw@mq:1883/"
@@ -151,6 +162,12 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
         # Long enough for every retry (10 s each) and a reconnect after it.
         await asyncio.sleep(40)
         receiver.cancel()
+        if knobs.get("closed"):
+            await sub.disconnect()
+            await asyncio.sleep(2)
+            left = net.host("main").connections
+            assert not left, f"{len(left)} client(s) still connected after disconnect()"
+            return
         for tag, qos in sent.items():
             count = got.count(tag)
             if count == 0 or (qos == 2 and count > 1):
@@ -190,6 +207,35 @@ def fix_pubrel() -> Callable[[], None]:
     def undo() -> None:
         ProtocolHandler.handle_pubrel = original_pubrel  # type: ignore[method-assign]
         ProtocolHandler._handle_qos2_message_flow = original_flow  # type: ignore[method-assign]
+
+    return undo
+
+
+def fix_disconnect() -> Callable[[], None]:
+    """``disconnect()`` that also stops a reconnect in progress."""
+    original = MQTTClient.disconnect
+
+    async def disconnect(self: Any) -> None:
+        reconnecting = self._disconnect_task
+        if (
+            self.session is not None
+            and not self.session.transitions.is_connected()
+            and reconnecting is not None
+            and not reconnecting.done()
+        ):
+            reconnecting.cancel()
+            with contextlib.suppress(BaseException):
+                await reconnecting
+            if self._handler is not None and self._handler.writer is not None:
+                with contextlib.suppress(Exception):
+                    await self._handler.writer.close()
+            return
+        await original(self)
+
+    MQTTClient.disconnect = disconnect  # type: ignore[method-assign]
+
+    def undo() -> None:
+        MQTTClient.disconnect = original  # type: ignore[method-assign]
 
     return undo
 
@@ -303,6 +349,45 @@ async def plain_publish() -> str:
     return outcome
 
 
+async def plain_disconnect() -> str:
+    """On a real loop: ``disconnect()`` while the client reconnects after a broker restart."""
+    open_connections: set[asyncio.StreamWriter] = set()
+    accepted = 0
+
+    async def broker(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal accepted
+        accepted += 1
+        await read_packet(reader)  # CONNECT
+        if accepted == 1:
+            writer.write(packet(0x20, b"\x00\x00"))
+            await asyncio.sleep(0.1)
+            writer.transport.abort()  # the broker restarts
+            return
+        await asyncio.sleep(0.2)  # the reconnect's CONNACK takes a moment
+        writer.write(packet(0x20, b"\x00\x00"))
+        open_connections.add(writer)
+        with contextlib.suppress(asyncio.IncompleteReadError, ConnectionError):
+            while await read_packet(reader) != 14:  # until DISCONNECT
+                pass
+        open_connections.discard(writer)
+
+    server = await asyncio.start_server(broker, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = MQTTClient(client_id="c", config={"auto_reconnect": True, "keep_alive": 60})
+    await client.connect(f"mqtt://127.0.0.1:{port}/")
+    await asyncio.sleep(0.2)
+    assert client.session is not None
+    before = client.session.transitions.state
+    await client.disconnect()
+    await asyncio.sleep(1)
+    after = client.session.transitions.state
+    server.close()
+    return (
+        f"disconnect() called while {before}; a second later the client is {after}, "
+        f"the broker has {len(open_connections)} connection(s) open"
+    )
+
+
 async def plain_qos() -> list[int]:
     """On a real loop: the QoS a QoS 2 subscriber receives for QoS 0, 1 and 2 publishes."""
     broker = Broker(
@@ -343,6 +428,7 @@ def main() -> int:
     for workload, fix in (
         ("TCP resets", fix_pubrel),
         ("TCP resets, publisher errors", fix_publish_errors),
+        ("TCP resets, disconnect", fix_disconnect),
     ):
         undo = fix()
         try:
@@ -365,6 +451,11 @@ def main() -> int:
     outcome = asyncio.run(plain_publish())
     print(f"real asyncio loop, connection lost before PUBACK: publish() {outcome}")
     assert "CancelledError" in outcome, outcome
+    reconnected = asyncio.run(plain_disconnect())
+    print(f"real asyncio loop, {reconnected}")
+    assert reconnected.endswith("client is connected, the broker has 1 connection(s) open"), (
+        reconnected
+    )
     received = asyncio.run(plain_qos())
     print(f"real asyncio loop, QoS 2 subscriber gets QoS 0, 1, 2 publishes at QoS {received}")
     assert received == [2, 2, 2], received

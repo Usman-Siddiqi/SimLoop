@@ -213,6 +213,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   confirmed on plain asyncio, not reported); Hypercorn handlers stuck in
   `send()` after a reset rediscover its open #390. New API:
   `Host.connections` lists a host's open TCP connections, for leak checks.
+- Connection-leak sweep: every findings harness re-run with a probe that
+  waits 2 s after the harness returns and lists the client host's open
+  TCP connections. New: amqtt's `disconnect()` is ignored during an
+  automatic reconnect, which then completes (confirmed on plain asyncio,
+  not reported). redis-py looked leaky only because the harness passes
+  its own pool, which `Redis.aclose()` leaves open by design; with
+  `pool.disconnect()` it is clean. Everything else was clean.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
