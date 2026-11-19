@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import subprocess
 import sys
@@ -208,3 +209,33 @@ def test_cli_check_command(capsys: pytest.CaptureFixture[str]) -> None:
     target = f"{Path(__file__).resolve().parent / 'workloads.py'}:busy_system"
     assert cli.main(["check", target, "--seeds", "2"]) == 0
     assert "deterministic: 2 seed(s)" in capsys.readouterr().out
+
+
+def test_garbage_from_an_earlier_run_is_finalized_before_the_next_one() -> None:
+    finalized_in: list[asyncio.AbstractEventLoop | None] = []
+
+    class Cycle:
+        def __init__(self) -> None:
+            self.me = self
+
+        def __del__(self) -> None:
+            try:
+                finalized_in.append(asyncio.get_running_loop())
+            except RuntimeError:
+                finalized_in.append(None)
+
+    held: list[Cycle] = []
+
+    async def first() -> None:
+        held.append(Cycle())
+        # Survives a full collection, so it now sits in the oldest generation.
+        gc.collect()
+
+    async def second() -> None:
+        await asyncio.sleep(0)
+
+    config = simloop.SimConfig(gc_interval=1)
+    assert simloop.run(first, seed=0, config=config).ok
+    held.clear()
+    assert simloop.run(second, seed=0, config=config).ok
+    assert finalized_in == [None], "an earlier run's object was finalized inside a later run"

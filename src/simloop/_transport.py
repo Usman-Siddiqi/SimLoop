@@ -244,8 +244,8 @@ class StreamTransport(asyncio.Transport):
             return
         self._closing = True
         self._network._record(self._host.name, "close", self._label)
+        # Not _eof_sent: asyncio drops a write after close() rather than raising.
         if not self._eof_sent:
-            self._eof_sent = True
             self._send("fin")
         self._loop.call_soon(self._lose, None, context=self._context)
 

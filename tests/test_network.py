@@ -462,6 +462,27 @@ def test_half_close() -> None:
     assert run_ok(main).value == b"cba"
 
 
+def test_write_after_close_is_dropped_like_asyncio() -> None:
+    # Real transports ignore a write after close() (another task may still hold
+    # the writer); only a write after write_eof() is an error.
+    async def main() -> str:
+        await asyncio.start_server(echo_handler, port=9)
+        _, writer = await asyncio.open_connection("localhost", 9)
+        writer.close()
+        writer.write(b"late\n")
+        _, other = await asyncio.open_connection("localhost", 9)
+        other.write_eof()
+        try:
+            other.write(b"x")
+        except RuntimeError as exc:
+            return str(exc)
+        finally:
+            other.close()
+        return "no error"
+
+    assert run_ok(main).value == "Cannot call write() after write_eof()"
+
+
 def test_handlers_run_on_the_server_host() -> None:
     async def main() -> list[str]:
         seen: list[str] = []

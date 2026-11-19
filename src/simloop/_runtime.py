@@ -286,10 +286,10 @@ class Simulation:
             raise RuntimeError("simulations cannot be nested")
         gc_was_enabled = gc.isenabled()
         if self.config.gc_interval:
-            # Garbage left by earlier runs sits in the young generations because
-            # automatic collection was off; clear it so its finalizers cannot
-            # fire at an arbitrary point inside this run.
-            gc.collect(1)
+            # Clear garbage left by earlier runs, so its finalizers cannot fire
+            # at a collection inside this run. A full collection: objects that
+            # survived an earlier run's collections sit in the oldest generation.
+            gc.collect()
             gc.disable()
         sandbox = (
             Sandbox(self.loop, self.seed, self.config.epoch, self.config.timezone)
