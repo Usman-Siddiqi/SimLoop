@@ -181,7 +181,7 @@ def test_datetime_reads_the_simulated_wall_clock() -> None:
     assert aware == "2024-01-01T01:00:00+00:00"
     assert naive == "2024-01-01T01:00:00"
     assert elapsed == 3600
-    assert exact_type is False  # inside the run the name is the stand-in
+    assert exact_type is True
     assert instance
 
 
@@ -201,6 +201,28 @@ def test_datetime_values_are_real_datetimes() -> None:
     assert isinstance(values, tuple)
     assert [type(v) for v in values] == [real, real, datetime.date, real]
     assert datetime.datetime is real
+
+
+def test_datetime_classes_are_never_replaced() -> None:
+    # C extensions (PyO3's abi3 datetime support, used by cryptography)
+    # look ``datetime.datetime`` up once and check types at the C level: a
+    # stand-in class seen inside a run would break them for good.
+    real_now = datetime.datetime.__dict__["now"]
+
+    class Moment(datetime.datetime):
+        pass
+
+    async def main() -> tuple[type, type, str, type]:
+        await asyncio.sleep(60)
+        moment = Moment.now(datetime.UTC)
+        return datetime.datetime, type(moment), moment.isoformat(), type(Moment.today())
+
+    seen, kind, text, today = run_ok(main).value or (object, object, "", object)
+    assert seen is datetime.datetime
+    assert (kind, today) == (Moment, Moment)
+    assert text == "2024-01-01T00:01:00+00:00"
+    assert datetime.datetime.__dict__["now"] is real_now
+    assert datetime.datetime.now().year >= 2026
 
 
 def test_datetime_imported_by_name_is_simulated() -> None:

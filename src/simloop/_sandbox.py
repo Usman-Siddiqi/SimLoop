@@ -248,7 +248,7 @@ class Sandbox:
         self.leak_errors: list[NondeterminismError] = []
         self.suspended = False
         self._saved: list[tuple[object, str, object]] = []
-        self._datetime_undo: list[tuple[object, str, object]] = []
+        self._datetime_undo: list[tuple[type, str, Any]] = []
         self._captured_undo: list[tuple[_Ref, object]] = []
         self._replacements: dict[int, object] = {}
         self._modules_before: frozenset[str] = frozenset()

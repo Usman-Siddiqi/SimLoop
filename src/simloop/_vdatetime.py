@@ -4,26 +4,20 @@ Local time (``now()``, ``today()``, ``fromtimestamp()`` without a zone) is
 the run's simulated zone (:class:`Zone`), not the host's.
 
 CPython's ``datetime`` reads the OS clock in C, so patching ``time.time`` does
-not reach it, and its types are immutable, so ``datetime.now`` cannot be
-replaced in place. Instead, during a run, ``datetime.datetime`` and
-``datetime.date`` are replaced by stand-in classes whose clock methods read the
-simulated wall clock. Every value they produce is an ordinary ``datetime`` or
-``date``, so pickling, ``type()`` checks and arithmetic see nothing unusual,
-and ``isinstance`` against a stand-in accepts real instances.
-
-``from datetime import datetime`` binds the real class into the importing
-module, so loaded modules are scanned for such references (as freezegun
-does). Each module is scanned once per process, which keeps the per-run cost
-to patching the references already found.
+not reach it. During a run the clock methods of the real ``datetime`` and
+``date`` classes are replaced in place, so the classes themselves never
+change: ``from datetime import datetime`` references, subclasses, pickling,
+``type()`` checks and C extensions all see the real types, and subclasses'
+``now()`` returns instances of the subclass, as it does outside.
 """
 
 from __future__ import annotations
 
+import ctypes
 import datetime as _datetime
-import sys
+import gc
 import zoneinfo
 from collections.abc import Callable
-from types import ModuleType
 from typing import Any
 
 real_datetime = _datetime.datetime
@@ -131,101 +125,85 @@ def _now() -> float:
     return _wall()
 
 
-class _StandInMeta(type):
-    _real: type
-
-    def __instancecheck__(cls, instance: object) -> bool:
-        return isinstance(instance, cls._real)
-
-    def __subclasscheck__(cls, subclass: type) -> bool:
-        return issubclass(subclass, cls._real)
+def _type_dict(cls: type) -> dict[str, Any]:
+    """The dict behind ``cls.__dict__``, writable even for C types."""
+    return gc.get_referents(cls.__dict__)[0]  # type: ignore[no-any-return]
 
 
-class SimDate(real_date, metaclass=_StandInMeta):
-    _real = real_date
+_type_modified = ctypes.pythonapi.PyType_Modified
+_type_modified.argtypes = [ctypes.py_object]
+_type_modified.restype = None
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
-        return real_date(*args, **kwargs)
-
-    @classmethod
-    def today(cls) -> Any:
-        return _local(_now()).date()
-
-    @classmethod
-    def fromtimestamp(cls, timestamp: float) -> Any:
-        return _local(timestamp).date()
+_real_fromtimestamp = {cls: cls.__dict__["fromtimestamp"] for cls in (real_datetime, real_date)}
 
 
-class SimDatetime(real_datetime, metaclass=_StandInMeta):
-    _real = real_datetime
-
-    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
-        return real_datetime(*args, **kwargs)
-
-    @classmethod
-    def now(cls, tz: _datetime.tzinfo | None = None) -> Any:
-        return _local(_now()) if tz is None else real_datetime.fromtimestamp(_now(), tz)
-
-    @classmethod
-    def today(cls) -> Any:
-        return _local(_now())
-
-    @classmethod
-    def fromtimestamp(cls, timestamp: float, tz: _datetime.tzinfo | None = None) -> Any:
-        return _local(timestamp) if tz is None else real_datetime.fromtimestamp(timestamp, tz)
-
-    @classmethod
-    def utcnow(cls) -> Any:
-        return real_datetime.fromtimestamp(_now(), _datetime.UTC).replace(tzinfo=None)
+def _from(cls: type, timestamp: float, tz: _datetime.tzinfo | None) -> Any:
+    """The original ``fromtimestamp`` of ``cls``'s base, building a ``cls``."""
+    base = real_datetime if issubclass(cls, real_datetime) else real_date
+    return _real_fromtimestamp[base].__get__(None, cls)(timestamp, tz)
 
 
-_STAND_INS: dict[int, type] = {id(real_datetime): SimDatetime, id(real_date): SimDate}
-_scanned: set[str] = set()
-_references: list[tuple[ModuleType, str, type]] = []
+def _datetime_now(cls: type, tz: _datetime.tzinfo | None = None) -> Any:
+    return _datetime_fromtimestamp(cls, _now(), tz)
 
 
-def _scan() -> None:
-    for name, module in list(sys.modules.items()):
-        if name in _scanned:
-            continue
-        _scanned.add(name)
-        if module is None or module is _datetime or name == __name__:
-            continue
-        try:
-            items = list(vars(module).items())
-        except TypeError:
-            continue
-        for attr, value in items:
-            if isinstance(value, type) and id(value) in _STAND_INS:
-                _references.append((module, attr, value))
+def _datetime_fromtimestamp(cls: type, timestamp: float, tz: _datetime.tzinfo | None = None) -> Any:
+    if tz is not None:
+        return _from(cls, timestamp, tz)
+    return _from(cls, timestamp, _zone).replace(tzinfo=None)
+
+
+def _datetime_utcnow(cls: type) -> Any:
+    return _from(cls, _now(), _datetime.UTC).replace(tzinfo=None)
+
+
+def _date_fromtimestamp(cls: type, timestamp: float) -> Any:
+    local = _datetime_fromtimestamp(real_datetime, timestamp)
+    return cls(local.year, local.month, local.day)
+
+
+def _today(cls: type) -> Any:
+    # As in C: today() is fromtimestamp(now), so subclasses that override
+    # fromtimestamp see it called.
+    return cls.fromtimestamp(_now())  # type: ignore[attr-defined]
+
+
+# CPython's ``datetime`` reads the OS clock in C. Rather than replacing the
+# classes (which breaks extensions that check types at the C level and cache
+# them, such as PyO3's abi3 datetime support used by ``cryptography``), the
+# clock methods are swapped in the real classes' own dicts for the run, the
+# way time-machine does it. ``date.today`` also serves ``datetime.today``.
+_PATCHES: list[tuple[type, str, Any]] = [
+    (real_datetime, "now", classmethod(_datetime_now)),
+    (real_datetime, "utcnow", classmethod(_datetime_utcnow)),
+    (real_datetime, "fromtimestamp", classmethod(_datetime_fromtimestamp)),
+    (real_date, "today", classmethod(_today)),
+    (real_date, "fromtimestamp", classmethod(_date_fromtimestamp)),
+]
 
 
 def install(
     wall: Callable[[], float], zone: _datetime.tzinfo = _datetime.UTC
-) -> list[tuple[object, str, object]]:
-    """Patch in the stand-ins; returns ``(owner, name, original)`` to undo."""
+) -> list[tuple[type, str, Any]]:
+    """Patch the clock methods in; returns ``(class, name, original)`` to undo."""
     global _wall, _zone
     _wall = wall
     _zone = zone
-    _scan()
-    undo: list[tuple[object, str, object]] = []
-    targets: list[tuple[object, str, type]] = [
-        (_datetime, "datetime", real_datetime),
-        (_datetime, "date", real_date),
-        *_references,
-    ]
-    for owner, attr, original in targets:
-        # Only replace a reference that still points at the real class.
-        if getattr(owner, attr, None) is original:
-            setattr(owner, attr, _STAND_INS[id(original)])
-            undo.append((owner, attr, original))
+    undo: list[tuple[type, str, Any]] = []
+    for cls, name, replacement in _PATCHES:
+        namespace = _type_dict(cls)
+        undo.append((cls, name, namespace[name]))
+        namespace[name] = replacement
+    for cls in (real_datetime, real_date):
+        _type_modified(cls)
     return undo
 
 
-def uninstall(undo: list[tuple[object, str, object]]) -> None:
+def uninstall(undo: list[tuple[type, str, Any]]) -> None:
     global _wall, _zone
-    for owner, attr, original in reversed(undo):
-        if getattr(owner, attr, None) is _STAND_INS[id(original)]:
-            setattr(owner, attr, original)
+    for cls, name, original in reversed(undo):
+        _type_dict(cls)[name] = original
+    for cls in (real_datetime, real_date):
+        _type_modified(cls)
     _wall = None
     _zone = _datetime.UTC
