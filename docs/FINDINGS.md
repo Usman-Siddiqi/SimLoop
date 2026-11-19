@@ -899,6 +899,51 @@ here. Rules (see `CLAUDE.md`):
   about failed connects in `_fill_free_pool`; we could not see whether its
   diff touches `release`. Not reported.
 
+### 22. aiohttp 3.14.5: graceful shutdown cancels handlers one `shutdown_timeout` late and does not wait for them
+
+- **Library:** [aiohttp](https://pypi.org/project/aiohttp/) 3.14.5 (latest
+  release; `RequestHandler.shutdown` is unchanged on the upstream default
+  branch).
+- **Reproduction:** [`findings/aiohttp_graceful_shutdown.py`](../findings/aiohttp_graceful_shutdown.py)
+  (the SimLoop harness and a plain-asyncio reproduction).
+- **Seeds:** an `AppRunner(app, shutdown_timeout=0.5)` server; 4 clients
+  send 10 requests each, whose handlers take 0-0.2 s or 0-3 s and spend
+  50 ms cleaning up when cancelled; `runner.cleanup()` starts at a random
+  time (0.3-1.5 s). "Handlers still running `shutdown_timeout` after
+  shutdown starts are cancelled then, and `on_cleanup` runs after they
+  have finished" fails on 95 of seeds 0-99 with the default scheduler
+  (first seed 0) and on 94 with `scheduler="fifo", timer_jitter=0.001`
+  (first seed 0): handlers were cancelled 1.0 s after shutdown began and
+  `on_cleanup` ran while 2-3 of them were still running. (The passing seeds
+  had no long handler in flight.)
+- **Property violated:** the documented graceful shutdown: "4. Wait a
+  short time for running handlers to complete ... adjustable with
+  `shutdown_timeout`. 5. Close any remaining connections and cancel their
+  handlers. It will wait on the canceling handlers for a short time, again
+  adjustable with `shutdown_timeout`. 6. Call the `Application.on_cleanup`
+  signal."
+- **Explanation:** `RequestHandler.shutdown(timeout)` first waits up to
+  `timeout` for the handler. Its "cancel" step then calls
+  `self._current_request._cancel(CancelledError())`, which only sets an
+  exception on the request's body stream: a handler that is not reading the
+  body (most handlers, once they have the request) keeps running, and
+  `shutdown` waits for it, shielded, up to `timeout` again. Only then does
+  it call `self._task_handler.cancel()`, and it returns without waiting
+  for the task, so `AppRunner.cleanup()` goes on to `on_cleanup` and
+  returns while the cancelled handlers are still running their `except` and
+  `finally` blocks. On plain asyncio with `shutdown_timeout=0.5`, a handler
+  sleeping 10 s was cancelled 1.0 s after `cleanup()` was called;
+  `on_cleanup` ran and `cleanup()` returned at 1.0 s, and the handler
+  finished its 0.1 s of cleanup at 1.1 s.
+- **Impact:** moderate: a server takes twice the configured grace period
+  before cancelling handlers (120 s with the default of 60 s), and
+  `on_cleanup` closes database pools and sessions while cancelled handlers
+  are still using them to roll back or release.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** PR #7718 (2023) introduced this shutdown sequence;
+  no issue found about the late cancellation or the missing wait (#8179 and
+  #8448 are about background tasks and cleanup contexts). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

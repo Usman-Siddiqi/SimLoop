@@ -91,6 +91,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   asyncio's `recv_into` path does (`get_buffer(-1)`, partial fills, the rest
   held while reading is paused); asyncmy needed it. asyncmy 0.2.18 passes
   the aiomysql pool harness (clean).
+- aiohttp 3.14.5 server shutdown: `AppRunner.cleanup()` cancels a
+  still-running handler only after 2 x `shutdown_timeout` and runs
+  `on_cleanup` without waiting for cancelled handlers (confirmed on plain
+  asyncio, not reported).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
