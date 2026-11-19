@@ -793,3 +793,40 @@ def test_stream_protocol_need_not_subclass_protocol() -> None:
         return await protocol.done
 
     assert run_ok(main).value == b"echo hello\n"
+
+
+def test_dual_stack_ipv6_udp_sees_ipv4_mapped_addresses() -> None:
+    async def main() -> list[object]:
+        net = simloop.network()
+        seen: list[object] = []
+
+        class Echo(asyncio.DatagramProtocol):
+            def connection_made(self, transport: asyncio.BaseTransport) -> None:
+                self.transport = transport
+
+            def datagram_received(self, data: bytes, addr: tuple[Any, ...]) -> None:
+                seen.append(addr)
+                self.transport.sendto(data, addr)  # type: ignore[attr-defined]
+
+        server = net.add_host("srv")
+        loop = asyncio.get_running_loop()
+        await server.run(loop.create_datagram_endpoint(Echo, local_addr=("::", 4433)))
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind(("::", 0, 0, 0))
+        replies: asyncio.Queue[tuple[bytes, object]] = asyncio.Queue()
+
+        class Client(asyncio.DatagramProtocol):
+            def datagram_received(self, data: bytes, addr: tuple[Any, ...]) -> None:
+                replies.put_nowait((data, addr))
+
+        transport, _ = await loop.create_datagram_endpoint(Client, sock=sock)
+        transport.sendto(b"ping", ("::ffff:10.0.0.2", 4433, 0, 0))
+        reply = await replies.get()
+        return [seen, reply, transport.get_extra_info("sockname")[0]]
+
+    assert run_ok(main).value == [
+        [("::ffff:10.0.0.1", 49152, 0, 0)],
+        (b"ping", ("::ffff:10.0.0.2", 4433, 0, 0)),
+        "::ffff:10.0.0.1",
+    ]

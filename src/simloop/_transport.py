@@ -26,6 +26,19 @@ if TYPE_CHECKING:
     from ._loop import SimEventLoop
 
 Address = tuple[str, int]
+
+_MAPPED = "::ffff:"
+
+
+def _as_ipv6(address: Address) -> tuple[str, int, int, int]:
+    """How a dual-stack IPv6 socket sees an IPv4 peer: an IPv4-mapped address."""
+    return (_MAPPED + address[0], address[1], 0, 0)
+
+
+def _unmapped(name: str) -> str:
+    return name[len(_MAPPED) :] if name.lower().startswith(_MAPPED) else name
+
+
 SegmentKind = Literal["synack", "data", "fin", "rst"]
 Segment = tuple[SegmentKind, bytes]
 
@@ -43,8 +56,6 @@ class SimSocket:
     urllib3-style pools) see the simulated connection's state.
     """
 
-    family = socket.AF_INET
-
     def __init__(
         self,
         kind: int,
@@ -53,7 +64,9 @@ class SimSocket:
         *,
         network: Network | None = None,
         readable: Callable[[], bool] | None = None,
+        family: int = socket.AF_INET,
     ) -> None:
+        self.family = family
         self.type = kind
         self.proto = socket.IPPROTO_TCP if kind == socket.SOCK_STREAM else socket.IPPROTO_UDP
         self._sockname = sockname
@@ -590,6 +603,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
         protocol: asyncio.DatagramProtocol,
         remote: Address | None,
         context: contextvars.Context,
+        family: int = socket.AF_INET,
     ) -> None:
         super().__init__()
         self._network = network
@@ -600,12 +614,24 @@ class DatagramEndpoint(asyncio.DatagramTransport):
         self._remote = remote
         self._context = context
         self._closing = False
-        self._socket = SimSocket(socket.SOCK_DGRAM, (host.ip, port), remote, network=network)
+        # An AF_INET6 endpoint is dual-stack: the simulated network is IPv4,
+        # and the protocol sees its peers as IPv4-mapped addresses.
+        self._ipv6 = family == socket.AF_INET6
+        self._socket = SimSocket(
+            socket.SOCK_DGRAM,
+            self._external((host.ip, port)),
+            None if remote is None else self._external(remote),
+            network=network,
+            family=family,
+        )
+
+    def _external(self, address: Address) -> Any:
+        return _as_ipv6(address) if self._ipv6 else address
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         info = {
-            "sockname": (self._host.ip, self._port),
-            "peername": self._remote,
+            "sockname": self._external((self._host.ip, self._port)),
+            "peername": None if self._remote is None else self._external(self._remote),
             "socket": self._socket,
         }
         return info.get(name, default)
@@ -628,7 +654,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
                 f"data argument must be a bytes-like object, not {type(data).__name__!r}"
             )
         if self._remote is not None:
-            if addr not in (None, self._remote):
+            if addr is not None and addr not in (self._remote, self._external(self._remote)):
                 raise ValueError(f"Invalid address: must be None or {self._remote}")
             addr = self._remote
         if addr is None:
@@ -637,7 +663,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
             return
         network = self._network
         try:
-            target = network.resolve(str(addr[0]), origin=self._host)
+            target = network.resolve(_unmapped(str(addr[0])), origin=self._host)
         except socket.gaierror:
             return
         port = int(addr[1])
@@ -686,7 +712,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
         self._loop.call_soon(
             self._protocol.datagram_received,
             payload,
-            source,
+            self._external(source),
             context=self._context,
         )
 
@@ -841,6 +867,7 @@ async def create_datagram_endpoint(
     remote_addr: tuple[str, int] | None = None,
     *,
     sock: Any = None,
+    family: int = 0,
     **_: Any,
 ) -> tuple[DatagramEndpoint, asyncio.DatagramProtocol]:
     owner = network.current_host()
@@ -848,24 +875,30 @@ async def create_datagram_endpoint(
         raise OSError(errno.ENETDOWN, f"host {owner.name!r} is down")
     if sock is not None:
         virtual = _virtual(sock)
+        family = virtual.family
         bound = virtual._take_bound_port()
         remote_addr = remote_addr or virtual._peer
     else:
         port = 0
         if local_addr is not None:
+            if not family and ":" in str(local_addr[0]):
+                family = socket.AF_INET6
             network._bind_address(owner, local_addr[0])
             port = int(local_addr[1])
         bound = network._claim_port(owner, port)
     remote: Address | None = None
     if remote_addr is not None:
-        target = network.resolve(remote_addr[0], origin=owner)
+        name = _unmapped(str(remote_addr[0]))
+        target = network.resolve(name, origin=owner)
         remote = (
-            target.ip if remote_addr[0] not in ("localhost", "127.0.0.1") else owner.ip,
+            target.ip if name not in ("localhost", "127.0.0.1", "::1") else owner.ip,
             int(remote_addr[1]),
         )
     protocol = protocol_factory()
     context = contextvars.copy_context()
-    endpoint = DatagramEndpoint(network, owner, bound, protocol, remote, context)
+    endpoint = DatagramEndpoint(
+        network, owner, bound, protocol, remote, context, family or socket.AF_INET
+    )
     network._datagrams[(owner.name, bound)] = endpoint
     network.loop.call_soon(protocol.connection_made, endpoint, context=context)
     return endpoint, protocol
@@ -960,7 +993,7 @@ class VirtualSocket:
     def bind(self, address: Any) -> None:
         if self._port is not None:
             raise OSError(errno.EINVAL, "Invalid argument")
-        self.network._bind_address(self._host, address[0] or None)
+        self.network._bind_address(self._host, _unmapped(address[0]) or None)
         self._port = self.network._claim_port(self._host, int(address[1]))
 
     def listen(self, backlog: int = 0) -> None:
@@ -973,18 +1006,19 @@ class VirtualSocket:
             raise UnsupportedOperation(
                 "blocking connect() is not simulated; use await loop.sock_connect()"
             )
-        target = self.network.resolve(str(address[0]), origin=self._host)
+        target = self.network.resolve(_unmapped(str(address[0])), origin=self._host)
         self._peer = (target.ip, int(address[1]))
 
-    def getsockname(self) -> Address:
+    def getsockname(self) -> Any:
         if self._transport is not None:
             return self._transport._local
-        return (self._host.ip, self._port or 0)
+        address = (self._host.ip, self._port or 0)
+        return _as_ipv6(address) if self.family == socket.AF_INET6 else address
 
-    def getpeername(self) -> Address:
+    def getpeername(self) -> Any:
         if self._peer is None:
             raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
-        return self._peer
+        return _as_ipv6(self._peer) if self.family == socket.AF_INET6 else self._peer
 
     def close(self) -> None:
         if self._closed:
