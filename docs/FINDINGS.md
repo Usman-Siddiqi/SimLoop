@@ -1284,6 +1284,16 @@ properties and fault mixes only.
   max_prefetch`, no task ran twice and no message was acked twice, every
   finished task was acked, and a stop without `wait_tasks_timeout` waited for
   every running task (200 seeds each, random and fifo).
+- **CPython 3.13.18 and 3.14.6 `asyncio.Queue.shutdown()`**, [`findings/asyncio_queue_shutdown.py`](../findings/asyncio_queue_shutdown.py):
+  with producers, consumers and `join()` waiters on `Queue`, `LifoQueue`
+  and `PriorityQueue` (blocking, `*_nowait` and `wait_for` calls) and a
+  graceful or immediate shutdown at a random time, the documented behaviour
+  held: no `QueueShutDown` before shutdown or from `get` on a non-empty
+  queue (graceful), every blocked caller woke, no item was lost or
+  duplicated beyond what an immediate shutdown drains, and `join()`
+  returned once nothing was unfinished (1000 seeds each, random, fifo and
+  PCT, `strict_cancellation=True`). A mutated `shutdown()` that wakes no
+  one fails 143 of 200 seeds.
 - **aiomisc 18.0.40 (`@aggregate`)**, [`findings/aiomisc_aggregate.py`](../findings/aiomisc_aggregate.py):
   every caller that was not cancelled got its own result and no argument
   went through a completed batch twice, with random windows, `max_count`

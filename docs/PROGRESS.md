@@ -121,6 +121,9 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   and the background collector were clean.
 - Clean harness: taskiq 0.13.0's worker `Receiver` (concurrency and
   prefetch limits, acks, graceful stop, task timeouts).
+- Python 3.14: the full test suite and the CLI example pass on 3.14.6; CI
+  now tests 3.11 to 3.14. Clean harness: `asyncio.Queue.shutdown()` (new in
+  3.13) on 3.13.18 and 3.14.6.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

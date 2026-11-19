@@ -104,5 +104,5 @@ met; `docs/PROGRESS.md` has the session-by-session log.
 - [x] Each harness documented, runnable as a script, and in CI (small seed budget)
 - [ ] `docs/FINDINGS.md` populated with confirmed bugs, suspected issues and
       false positives, each with a reproduction script and seed (24 confirmed, 4 suspected,
-      2 false positives, 21 clean harnesses so far)
+      2 false positives, 22 clean harnesses so far)
 - [x] README findings section lists only confirmed results
