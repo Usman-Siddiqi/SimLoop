@@ -33,10 +33,18 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   the lock (confirmed on real 3.11.1-3.11.18, fixed in 3.12 by the
   `wait_for` rewrite; CI checks it on 3.11). aiotools 2.2.4 `TaskScope`
   timeouts leak a cancel request, which makes a later failing `TaskGroup`
-  cancel the task on 3.13+ (confirmed, not reported). aiometer 1.0.0
-  `run_any` waits for every function (suspected). Clean: anyio primitives,
-  uvicorn + Starlette + httpx, aiometer meters.
-- 229 tests on 3.11 to 3.13.
+  cancel the task on 3.13+ (confirmed, not reported). cashews 7.6.0: with
+  the default `@cache(protected=True)`, one caller's timeout cancels every
+  concurrent caller for the key (confirmed, not reported). backoff 2.2.1
+  `max_time` uses a stale, wall-clock elapsed time (known upstream,
+  rediscovered; the clock half shown with a SimLoop clock jump). Suspected:
+  aiometer 1.0.0 `run_any` waits for every function; asyncstdlib 3.14.0
+  `tee` peers silently end when another peer is cancelled. Clean: anyio
+  primitives, uvicorn + Starlette + httpx, aiometer meters, asyncstdlib
+  `tee` with a lock, aiostream, aiomisc `@aggregate`, tenacity.
+- `strict_cancellation` also flags a `CancelledError` that reached a task
+  from another task's cancellation (how the cashews bug shows up).
+- 231 tests on 3.11 to 3.13.
 
 ### In progress
 - Nothing half-done.
@@ -48,8 +56,8 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - TLS and Unix sockets are not simulated.
 
 ### Next steps
-1. More M9 harnesses: asyncstdlib, cashews, tenacity/backoff, aiohttp and
-   websockets server shutdown.
+1. More M9 harnesses: aiohttp and websockets server shutdown, other
+   "singleflight" caches that share a task between callers.
 2. Coverage- or novelty-guided seed exploration (M8, optional).
 3. Run every findings harness with `strict_cancellation=True` in CI.
 
