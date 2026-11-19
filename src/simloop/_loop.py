@@ -132,6 +132,10 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         self._kept_running_cancelled: dict[asyncio.Task[Any], str] = {}
         # Tasks woken by another task's cancellation that nobody asked them to share.
         self._stray_cancels: dict[asyncio.Task[Any], str] = {}
+        # Plain futures tasks are suspended on, and which of those futures were
+        # cancelled along with a task awaiting them.
+        self._future_waiters: dict[asyncio.Future[Any], set[asyncio.Task[Any]]] = {}
+        self._cancelled_for: dict[asyncio.Future[Any], str] = {}
 
         self._now = start_time
         self._step = 0
@@ -370,8 +374,11 @@ class SimEventLoop(asyncio.AbstractEventLoop):
         if task is not None:
             if task.done():
                 self._task_finished(task)
-            elif (
-                self.strict_cancellation
+            elif self.strict_cancellation:
+                self._note_waiting(task)
+            if (
+                not task.done()
+                and self.strict_cancellation
                 and task.cancelling()
                 and task not in self._kept_running_cancelled
             ):
@@ -483,25 +490,56 @@ class SimEventLoop(asyncio.AbstractEventLoop):
 
     def _note_stray_cancel(self, task: asyncio.Task[Any], handle: asyncio.Handle) -> None:
         # A task resumes through a wakeup callback that carries the future it
-        # awaited. If that is another task, now cancelled, the CancelledError
-        # about to be thrown into this task was meant for someone else.
-        # (Libraries that wake their own task by cancelling a private future
-        # are left alone: that future is not a task.)
+        # awaited. If that future was cancelled and this task was not asked to
+        # stop, the CancelledError about to be thrown into it was meant for
+        # someone else: either the future is another task, or it is a future
+        # shared with a task that was cancelled while awaiting it (awaiting a
+        # future directly cancels it along with the awaiting task). A private
+        # future a library cancels to wake its own task matches neither.
         args = getattr(handle, "_args", None)
-        if not args or task in self._stray_cancels:
+        awaited = args[0] if args else None
+        if not isinstance(awaited, asyncio.Future) or awaited is task:
             return
-        awaited = args[0]
-        if (
-            isinstance(awaited, asyncio.Task)
-            and awaited is not task
-            and awaited.cancelled()
-            and not task.cancelling()
-        ):
+        source = self._stray_source(task, awaited)
+        if source is not None and task not in self._stray_cancels:
+            self._stray_cancels[task] = source
+        waiters = self._future_waiters.get(awaited)
+        if waiters is not None:
+            waiters.discard(task)
+            if not waiters:
+                del self._future_waiters[awaited]
+                self._cancelled_for.pop(awaited, None)
+
+    def _stray_source(self, task: asyncio.Task[Any], awaited: asyncio.Future[Any]) -> str | None:
+        if not awaited.cancelled():
+            return None
+        if task.cancelling():
+            if not isinstance(awaited, asyncio.Task):
+                self._cancelled_for.setdefault(awaited, task.get_name())
+            return None
+        if isinstance(awaited, asyncio.Task):
             coro: Any = awaited.get_coro()
             qualname = getattr(coro, "__qualname__", None) or type(coro).__name__
-            self._stray_cancels[task] = (
-                f"task {awaited.get_name()!r} ({qualname}), cancelled at t={self._now!r}"
+            return (
+                f"task {awaited.get_name()!r} ({qualname}), which was cancelled at "
+                f"t={self._now:.6g}, often on behalf of another caller sharing it,"
             )
+        culprit = self._cancelled_for.get(awaited)
+        if culprit is None:
+            others = self._future_waiters.get(awaited, ())
+            culprit = next((other.get_name() for other in others if other.cancelling()), None)
+        if culprit is None:
+            return None
+        return (
+            f"a future it shared with task {culprit!r}, which was cancelled while "
+            f"awaiting it at t={self._now:.6g} (awaiting a future directly cancels the "
+            "future along with the awaiting task),"
+        )
+
+    def _note_waiting(self, task: asyncio.Task[Any]) -> None:
+        waiting = getattr(task, "_fut_waiter", None)
+        if isinstance(waiting, asyncio.Future) and not isinstance(waiting, asyncio.Task):
+            self._future_waiters.setdefault(waiting, set()).add(task)
 
     @property
     def tasks(self) -> list[asyncio.Task[Any]]:
@@ -866,9 +904,8 @@ def _stray_cancel(task: asyncio.Task[Any], source: str) -> CancellationLeak:
     qualname = getattr(coro, "__qualname__", None) or type(coro).__name__
     return CancellationLeak(
         f"task {task.get_name()!r} ({qualname}) ended with CancelledError although "
-        f"nothing called cancel() on it: it awaited {source}, and that "
-        "cancellation (often made on behalf of another caller sharing the task) "
-        "escaped into it",
+        f"nothing called cancel() on it: it awaited {source} and that "
+        "cancellation escaped into it",
         task.get_name(),
         qualname,
         kind="stray_cancel",

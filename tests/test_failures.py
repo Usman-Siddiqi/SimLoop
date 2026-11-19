@@ -382,3 +382,31 @@ def test_strict_cancellation_ignores_cancelling_your_own_future() -> None:
 
     result = simloop.run(main, config=simloop.SimConfig(strict_cancellation=True))
     assert result.ok, result.failure
+
+
+def test_strict_cancellation_flags_a_cancellation_from_a_shared_future() -> None:
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        shared: asyncio.Future[str] = loop.create_future()
+
+        def resolve() -> None:
+            if not shared.done():
+                shared.set_result("value")
+
+        loop.call_later(1, resolve)
+
+        async def impatient() -> None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(shared, 0.1)  # cancels the shared future
+
+        async def patient() -> str:
+            return await shared
+
+        waiter = loop.create_task(patient(), name="patient")
+        await asyncio.gather(impatient(), waiter, return_exceptions=True)
+
+    result = simloop.run(main, config=simloop.SimConfig(strict_cancellation=True))
+    assert result.failure is not None
+    assert result.failure.kind == "stray_cancel"
+    assert "'patient'" in result.failure.message
+    assert "a future it shared with" in result.failure.message
