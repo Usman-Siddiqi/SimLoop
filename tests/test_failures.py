@@ -396,8 +396,11 @@ def test_strict_cancellation_flags_a_cancellation_from_a_shared_future() -> None
         loop.call_later(1, resolve)
 
         async def impatient() -> None:
+            # Cancelling the task cancels the future it awaits. (wait_for on
+            # 3.11 cancels the future itself instead, which is not attributed.)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(shared, 0.1)  # cancels the shared future
+                async with asyncio.timeout(0.1):
+                    await shared
 
         async def patient() -> str:
             return await shared

@@ -37,7 +37,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Nothing half-done.
 
 ### Known issues
-- Same as session 4.
+- Same as session 4, plus: on Python 3.11, `wait_for(future, t)` cancels
+  the future itself rather than the awaiting task, so a shared future
+  cancelled that way is not attributed and `stray_cancel` stays silent
+  (3.12+ is covered; the findings CI job runs on 3.13).
 
 ### Next steps
 1. More shared-future/shared-task patterns: other DataLoader ports,
