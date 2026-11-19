@@ -525,6 +525,7 @@ against the pinned versions.
 | CPython asyncio | 3.11.x | Cancelling a task while `wait_for` is cancelling its inner task after a timeout returns early; `async with cond` then releases another task's lock and a second task enters the critical section ([script](findings/cpython311_wait_for_lock.py)) | Fixed in 3.12 by the `wait_for` rewrite (GH-96764); rediscovered |
 | [aiotools](https://pypi.org/project/aiotools/) | 2.2.4 | An expired `TaskScope`/`move_on_after` timeout never calls `uncancel()`, so on Python 3.13+ a later failing `TaskGroup` in the same task also cancels the task ([script](findings/aiotools_scope_timeout.py)) | No matching upstream issue found; not reported |
 | [cashews](https://pypi.org/project/cashews/) | 7.6.0 | With the default `@cache(..., protected=True)`, one caller's timeout cancels the shared call, and every concurrent caller for the same key gets `CancelledError` ([script](findings/cashews_shared_cancel.py)) | No matching upstream issue found; not reported |
+| [backoff](https://pypi.org/project/backoff/) | 2.2.1 | `max_time` is checked against the elapsed time from before the failed attempt, and against the wall clock, so attempts start after the deadline (and a backward clock step extends it) ([script](findings/backoff_max_time.py)) | Already known upstream (#186, #149; open PRs #130, #150); rediscovered |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests)

@@ -179,6 +179,31 @@ here. Rules (see `CLAUDE.md`):
   "shield" on 2026-11-18 (#150 is about Redis timeouts under many cancelled
   requests, with no root cause identified). Not reported.
 
+### 6. backoff 2.2.1: `max_time` uses a stale, wall-clock elapsed time
+
+- **Library:** [backoff](https://pypi.org/project/backoff/) 2.2.1 (latest
+  release on 2026-11-18). Both the async and the sync decorators.
+- **Reproduction:** [`findings/backoff_max_time.py`](../findings/backoff_max_time.py)
+  (plain-asyncio reproduction, SimLoop harness and a clock-jump run).
+- **Seeds:** "no attempt starts after `max_time`" fails on 148 of seeds
+  0-999 with the default settings and with `scheduler="fifo"` (first
+  failing seed 1).
+- **Property violated:** `max_time` is documented as "the maximum total
+  amount of time to try for before giving up".
+- **Explanation:** the retry loop computes `elapsed` at its top, before the
+  attempt runs, and checks `elapsed >= max_time` after the attempt fails. An
+  attempt that itself runs past the deadline is judged by when it started,
+  so backoff sleeps and starts one more attempt after `max_time`. On plain
+  asyncio, `max_time=0.1` with 0.2 s attempts makes 2 attempts over 0.41 s.
+  `elapsed` also comes from `datetime.datetime.now()`: with SimLoop's
+  `faults.clock_jump("main", -30.0)` at t=0.35, `max_time=1.0` kept retrying
+  until t=31.0.
+- **Feasibility:** deterministic for slow attempts; the clock case needs a
+  wall-clock step backwards (NTP, VM resume), which SimLoop injects.
+- **Upstream status:** already known. Issue litl/backoff#186 and open pull
+  request #130 describe the stale `elapsed`; issue #149 and open pull
+  request #150 the wall clock. Listed as a rediscovery, not a new report.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
@@ -338,6 +363,21 @@ properties and fault mixes only.
   the connection 68 times in 30 sample runs. An early "lost message" failure
   here was a SimLoop bug (segments in flight when a partition healed could
   overtake the held ones), now fixed.
+- **aiostream 0.8.2**, [`findings/aiostream_operators.py`](../findings/aiostream_operators.py):
+  `merge` delivered every item once and in per-source order, `map` with
+  `task_limit` kept its bound and its order when `ordered=True`, and leaving
+  a merged stream early (`break` or a timeout) closed every source. 1000
+  seeds each with `random`, `pct` and `fifo` plus 1 ms jitter.
+- **aiomisc 18.0.40 (`@aggregate`)**, [`findings/aiomisc_aggregate.py`](../findings/aiomisc_aggregate.py):
+  every caller that was not cancelled got its own result and no argument
+  went through a completed batch twice, with random windows, `max_count`
+  and caller timeouts. A batch whose leading caller is cancelled is
+  restarted by the next caller, so work before the first `await` in the
+  batch function runs again; that is a design choice, not counted here.
+- **tenacity 9.2.1**, [`findings/tenacity_retry.py`](../findings/tenacity_retry.py):
+  with `stop_before_delay(T)` no attempt started after `T` (plus timer
+  lateness), and cancelling the caller stopped retrying. `stop_after_delay`
+  does start attempts after its delay, as its docstring says.
 - **asyncstdlib 3.14.0 (`tee` with a lock)**, [`findings/asyncstdlib_tee_cancel.py`](../findings/asyncstdlib_tee_cancel.py):
   1 to 4 peers consumed concurrently through `lock=asyncio.Lock()` each saw
   every item in order, 1000 seeds each with `random`, `pct` and `fifo` plus
