@@ -63,3 +63,4 @@ grpclib==0.4.9
 aiomysql==0.3.2
 PyMySQL==1.2.4
 asyncmy==0.2.18
+asyncua==2.1.0

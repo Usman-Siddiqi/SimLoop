@@ -1752,6 +1752,92 @@ here. Rules (see `CLAUDE.md`):
 - **Feasibility:** deterministic on plain asyncio (the script above).
 - **Upstream status:** no matching issue found. Not reported.
 
+### 39. asyncua 2.1.0: after a reconnect the client sends Republish requests in an endless loop
+
+- **Library:** [asyncua](https://pypi.org/project/asyncua/) 2.1.0 (latest
+  release), `Client(auto_reconnect=True)` against the asyncua `Server`.
+- **Reproduction:** [`findings/asyncua_reconnect.py`](../findings/asyncua_reconnect.py)
+  (workload "TCP resets", controls with the server answering
+  `BadMessageNotAvailable`, and a plain-asyncio reproduction).
+- **Seeds:** a server with one writable variable per task, a client
+  subscribed to all of them, three tasks writing and reading back their
+  own variable. Clean with no faults and with `wait_for` cancellations, 30
+  seeds each on both schedulers. With 1% TCP resets per segment, 26 / 30
+  runs fail under the random scheduler and 26 / 30 under fifo with jitter:
+  8 (first seed 9) and 5 (first seed 2) with more than 4,000 Republish
+  requests after the faults stopped, the rest with a subscription that no
+  longer delivers (#40, reached when a later reset ends the loop). With
+  both fixes, all 60 pass.
+- **Property violated:** reconnecting sends a bounded number of requests,
+  and the supervisor goes back to watching the connection.
+- **Explanation:** after a lost connection the supervisor reconnects,
+  re-activates the session and takes its subscription over
+  (`TransferSubscriptions`). `Subscription._republish_gaps` then asks for
+  each missed notification with a Republish request, one sequence number
+  after another, and stops only on `BadMessageNotAvailable`. The asyncua
+  server never sends that: `InternalSubscription.republish` returns an
+  empty `NotificationMessage` for a sequence number it does not hold (Part
+  4, 5.13.6 requires `Bad_MessageNotAvailable`). The client takes the
+  empty message as a notification and asks for the next number, forever.
+
+  On plain asyncio (server and client on localhost, one aborted client
+  socket): the client is CONNECTED again within milliseconds, and sends
+  4,000 to 5,000 Republish requests a second from then on (39,798 in 10 s
+  in one run, 9,363 in 2 s in another). Reads and writes still work, but
+  the supervisor never returns to its health checks, so a connection that dies silently is no longer
+  noticed. Both sides can fix it: the server by answering
+  `BadMessageNotAvailable` (the control in the script), the client by
+  stopping when the returned message does not carry the sequence number
+  it asked for.
+- **Impact:** high for asyncua-to-asyncua deployments: every reconnect
+  that reuses a session leaves the client spinning at full speed against
+  the server until the next connection loss.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** no matching issue found; the loop is unchanged on
+  master (auto-reconnect landed in 2.0). Not reported.
+
+### 40. asyncua 2.1.0: a reconnect interrupted while it recreates a subscription loses its data changes for good
+
+- **Library:** asyncua 2.1.0, `Client(auto_reconnect=True)`,
+  `Subscription.recreate`.
+- **Reproduction:** [`findings/asyncua_reconnect.py`](../findings/asyncua_reconnect.py)
+  (workload "server restart, TCP resets, Republish fixed", with #39 fixed
+  so that it does not hide this one; controls with both fixes; and a
+  plain-asyncio reproduction).
+- **Seeds:** the harness of #39, with the server crashing and restarting
+  once and 6% TCP resets per segment. 24 / 30 runs fail under the random
+  scheduler (first seed 1) and 27 / 30 under fifo with jitter (first seed
+  0): after the faults stop, writes to all three variables produce no data
+  change. With both fixes, all 60 pass, also with `wait_for` cancellations.
+- **Property violated:** once the connection is back, a subscription
+  delivers data changes for every item it monitors.
+- **Explanation:** when the client cannot take its subscription over (here
+  because the restarted server forgot the session) it calls
+  `Subscription.recreate`, which is not atomic. It clears
+  `_monitored_items`, sends `CreateSubscription`, then puts the items back
+  and sends `CreateMonitoredItems`. If the connection drops during
+  `CreateSubscription`, the items are gone: the next reconnect recreates a
+  subscription that monitors nothing ("0 monitored items left"). If it
+  drops during `CreateMonitoredItems`, the client keeps its items, but the
+  server's new subscription has none, and the next reconnect takes that
+  empty subscription over (fifo seed 28 of the control, before the fix
+  covered it). The supervisor logs "Failed to restore subscription",
+  reports "Reconnected successfully", and the application gets no error.
+
+  On plain asyncio: a `recreate()` whose `CreateSubscription` fails with
+  `ConnectionError`, followed by a successful `recreate()`, leaves 0
+  monitored items, and a write to the variable produces no data change.
+  The failure is injected there; in the simulation it is a real reset.
+- **Impact:** high: the client looks healthy and connected, while its
+  subscriptions silently stop, which is the failure that auto-reconnect is
+  meant to prevent.
+- **Feasibility:** needs a connection loss during the recreate's first
+  requests, right after a reconnect; flaky networks that just dropped a
+  connection are where that happens. Reproduced under fifo with timing
+  jitter.
+- **Upstream status:** no matching issue found; `recreate` is unchanged
+  on master. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

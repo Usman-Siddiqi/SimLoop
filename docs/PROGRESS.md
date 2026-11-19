@@ -220,6 +220,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   not reported). redis-py looked leaky only because the harness passes
   its own pool, which `Redis.aclose()` leaves open by design; with
   `pool.disconnect()` it is clean. Everything else was clean.
+- asyncua 2.1.0 (OPC UA server and client, `auto_reconnect=True`, TCP
+  resets, a server restart): reads and writes clean under resets and
+  cancellations. After a reconnect that reuses the session, the client
+  sends Republish requests forever, because the asyncua server answers a
+  missing message with an empty one; and a connection lost while a
+  subscription is recreated leaves it monitoring nothing. Both confirmed
+  on plain asyncio, not reported.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
