@@ -1283,6 +1283,55 @@ here. Rules (see `CLAUDE.md`):
   `cancelling`, `TaskGroup` and cancellation: nothing matching (#131 is
   about server-side cancellation handling). Not reported.
 
+### 29. MCP Python SDK 2.3.0: streamable HTTP keeps abandoned handlers running in JSON mode, and one failed POST closes the client (known upstream)
+
+- **Library:** [mcp](https://pypi.org/project/mcp/) 2.3.0 (latest
+  release), `MCPServer` with `streamable_http_app()` under uvicorn 0.54.0,
+  and `mcp.Client` over its own HTTP stack (httpx2 2.16.2).
+- **Reproduction:** [`findings/mcp_streamable_http.py`](../findings/mcp_streamable_http.py)
+  (the SimLoop harness and two plain-asyncio reproductions, one through a
+  TCP relay that resets a single tool call's connection).
+- **Seeds:** one `echo` tool (sleep, return the token); four callers make
+  six calls each, 30% of them on a 5 s handler that the caller abandons
+  after 0-50 ms (`wait_for` or `read_timeout_seconds`). Seeds 0-49, default
+  scheduler / `scheduler="fifo", timer_jitter=0.001`,
+  `strict_cancellation=True`. In-process, and over HTTP with SSE
+  responses, every check held (abandoned handlers cancelled, replies
+  matched, client recovered). With `json_response=True`: 50 / 50 runs fail
+  (first seed 0 / 0), e.g. seed 0: 7 handlers still running 0.3 s after
+  their callers gave up. With 0.5% TCP resets per segment: 20 / 16 fail
+  (first seed 3 / 2) with an `ExceptionGroup` from the client.
+- **Properties violated:** a request the client abandons is cancelled on
+  the server; a transport error on one request fails that request only.
+- **Explanation:** on the 2026-07-28 protocol the client cancels a request
+  by closing its POST and swallows `notifications/cancelled`. The server's
+  SSE path runs the handler beside a `watch_disconnect` task, but its JSON
+  path awaits the handler with nothing watching for `http.disconnect`, so
+  the handler runs to completion. Separately, an exception from
+  `httpx2` while a POST is in flight (`ReadError`) escapes the request's
+  task into the transport's task group; that cancels every other request
+  and the session's streams, so calls in flight and all later calls on the
+  client fail, and leaving `async with Client(...)` raises an
+  `ExceptionGroup`.
+
+  On plain asyncio: with `json_response=True`, a call abandoned after
+  0.1 s on a 1 s handler leaves the handler running 0.4 s later. Through a
+  relay that resets one tool call's connection, that call raises
+  `CancelledError`, the next call on the same client raises
+  `CancelledError` or `MCPError: Connection closed` although the server is
+  healthy, and leaving the client raises `ExceptionGroup`.
+- **Impact:** high for HTTP deployments: one dropped connection (a proxy
+  timeout, a load balancer restart) disables a long-lived client, and in
+  JSON mode every abandoned call keeps its server-side work going.
+- **Feasibility:** deterministic on plain asyncio (the scripts above).
+- **Upstream status:** both known: open issue
+  modelcontextprotocol/python-sdk#3762 (JSON response mode does not
+  observe client disconnects), and open issues #3522 (the client stays
+  closed after an interrupted response) and #3560 (a POST failure looks
+  like cancellation to the caller). Rediscovered here from generic
+  "abandoned work is cancelled" and "the client recovers" checks. Not
+  reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

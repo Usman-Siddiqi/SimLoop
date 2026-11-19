@@ -152,6 +152,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   deadline leaves a cancel request on the caller's task, which on 3.13+
   makes a later failing `TaskGroup` cancel the task (confirmed on plain
   asyncio, not reported).
+- MCP Python SDK 2.3.0 (in-process and streamable HTTP under uvicorn):
+  cancellation handled in-process and with SSE responses; in JSON
+  response mode abandoned handlers keep running, and one TCP reset during
+  a POST closes the client session (both rediscover open upstream
+  issues #3762, #3522, #3560).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
