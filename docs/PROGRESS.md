@@ -280,7 +280,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 257 tests.
+- 262 tests.
+- Hunting stopped here at Usman's request; README polished (quick start,
+  findings summary, every finding labelled unreported / partly known /
+  known / fixed upstream).
 
 ### In progress
 - Nothing half-done.
@@ -297,6 +300,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
    misuse.
 2. Run every findings harness with `strict_cancellation=True` in CI.
 3. Coverage- or novelty-guided seed exploration (M8, optional).
+4. Unfinished lead, not in the findings: saq 0.26.5 (Redis queue) needs
+   lists, `BLMOVE`, pattern pub/sub and its three Lua scripts in
+   `_resp.py` (a draft worked but was not kept). A first harness saw jobs
+   left `ABORTING` forever after an abort, and a swept job marked aborted;
+   neither was analysed, so they may be harness artifacts.
 
 ## Session 4 (2026-11-18): timeline, fault schedules, cancellation checks, more findings
 
