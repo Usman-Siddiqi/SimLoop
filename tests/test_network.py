@@ -846,3 +846,33 @@ def test_datagram_endpoint_is_connected_when_returned() -> None:
         return made == [transport]
 
     assert run_ok(main).value is True
+
+
+def test_data_arriving_together_comes_back_from_one_read() -> None:
+    async def main() -> list[bytes]:
+        net = simloop.network()
+        reads: list[bytes] = []
+
+        async def chatty() -> None:
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                writer.write(b"one ")
+                writer.write(b"two ")
+                await asyncio.sleep(0.05)
+                writer.write(b"three")
+                writer.close()
+
+            server = await asyncio.start_server(handle, port=9)
+            await server.serve_forever()
+
+        class Client(asyncio.Protocol):
+            def data_received(self, data: bytes) -> None:
+                reads.append(data)
+
+        net.add_host("chatty", entry=chatty)
+        net.set_link("chatty", "main", latency=0.01)
+        await asyncio.sleep(0.01)
+        await asyncio.get_running_loop().create_connection(Client, "chatty", 9)
+        await asyncio.sleep(1)
+        return reads
+
+    assert run_ok(main).value == [b"one two ", b"three"]

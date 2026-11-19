@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 Address = tuple[str, int]
 
 _MAPPED = "::ffff:"
+# asyncio's selector transports read at most this much per recv().
+_READ_SIZE = 256 * 1024
 
 
 def _as_ipv6(address: Address) -> tuple[str, int, int, int]:
@@ -139,6 +141,7 @@ class StreamTransport(asyncio.Transport):
         self._eof_sent = False
         self._paused = False
         self._pending: deque[Segment] = deque()
+        self._read_scheduled = False
         self._held: deque[Segment] = deque()
         self._replay_scheduled = False
         self._eof_received = False
@@ -162,9 +165,9 @@ class StreamTransport(asyncio.Transport):
         return f"{self._remote[0]}:{self._remote[1]} -> {self._local[0]}:{self._local[1]}"
 
     def _socket_readable(self) -> bool:
-        # Data is handed to the protocol as soon as it arrives, so the kernel
-        # buffer only holds what is waiting while reading is paused, or the
-        # end-of-stream / reset that a recv() would report.
+        # The kernel buffer holds what arrived and has not been read yet (for
+        # a loop iteration, or while reading is paused), or the end-of-stream
+        # / reset that a recv() would report.
         return bool(self._pending) or self._eof_received or self._dead
 
     # -- asyncio.Transport API ---------------------------------------------------------
@@ -200,7 +203,7 @@ class StreamTransport(asyncio.Transport):
             return
         self._paused = False
         if self._pending:
-            self._loop.call_soon(self._drain_pending, context=self._context)
+            self._schedule_read()
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         if not isinstance(data, (bytes, bytearray, memoryview)):
@@ -326,28 +329,49 @@ class StreamTransport(asyncio.Transport):
     def _accept_segment(self, segment: Segment) -> None:
         kind, _payload = segment
         if kind == "rst":
-            self._eof_received = True
-            if not self._dead:
-                self._network._record(self._host.name, "reset", f"{self._label} by peer")
-                # Like asyncio's _force_close: stop reading now, but report the
-                # loss from a later callback, after anything already scheduled.
-                self._closing = True
-                self._pending.clear()
-                self._loop.call_soon(
-                    self._lose,
-                    ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"),
-                    context=self._context,
-                )
+            if self._pending and not self._dead and not self._closing:
+                # The kernel keeps data that arrived before a reset readable;
+                # recv() reports the reset once it has been read.
+                self._pending.append(segment)
+                return
+            self._reset_by_peer()
             return
         if self._dead or (self._closing and kind == "data"):
             if kind == "data" and self.peer is not None and not self.peer._dead:
                 # Data for a socket nobody reads any more: the kernel answers with RST.
                 self._send_reset_back()
             return
-        if self._paused or self._pending or self._protocol is None:
-            self._pending.append(segment)
+        # Like the kernel's receive buffer: segments wait there until the loop
+        # gets round to reading, and everything that arrived by then comes
+        # back from one recv() (one data_received call), so a protocol never
+        # sees two reads of one socket with nothing run in between.
+        self._pending.append(segment)
+        if not self._paused and self._protocol is not None:
+            self._schedule_read()
+
+    def _schedule_read(self) -> None:
+        if not self._read_scheduled:
+            self._read_scheduled = True
+            self._loop.call_soon(self._read_ready, context=self._context)
+
+    def _read_ready(self) -> None:
+        self._read_scheduled = False
+        self._drain_pending()
+
+    def _reset_by_peer(self) -> None:
+        self._eof_received = True
+        if self._dead:
             return
-        self._deliver(segment)
+        self._network._record(self._host.name, "reset", f"{self._label} by peer")
+        # Like asyncio's _force_close: stop reading now, but report the loss
+        # from a later callback, after anything already scheduled.
+        self._closing = True
+        self._pending.clear()
+        self._loop.call_soon(
+            self._lose,
+            ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"),
+            context=self._context,
+        )
 
     def _send_reset_back(self) -> None:
         peer = self.peer
@@ -365,7 +389,29 @@ class StreamTransport(asyncio.Transport):
 
     def _drain_pending(self) -> None:
         while self._pending and not self._paused and not self._closing:
-            self._deliver(self._pending.popleft())
+            kind, payload = self._pending.popleft()
+            if kind == "data":
+                # One read takes all the data waiting, up to asyncio's read size.
+                chunks = [payload]
+                size = len(payload)
+                while self._pending and self._pending[0][0] == "data" and size < _READ_SIZE:
+                    more = self._pending.popleft()[1]
+                    chunks.append(more)
+                    size += len(more)
+                payload = b"".join(chunks)
+                if size > _READ_SIZE:
+                    self._pending.appendleft(("data", payload[_READ_SIZE:]))
+                    payload = payload[:_READ_SIZE]
+                self._deliver(("data", payload))
+                if self._pending and not self._paused:
+                    # Whatever is left comes from the next read, a loop
+                    # iteration later.
+                    self._schedule_read()
+                    return
+            elif kind == "rst":
+                self._reset_by_peer()
+            else:
+                self._deliver((kind, payload))
 
     def _deliver(self, segment: Segment) -> None:
         kind, payload = segment
