@@ -207,6 +207,12 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   issues #58/#273; not reported). Framework change on the way: object
   addresses (`0x7f...`) in task names and trace details are masked, since
   aiocoap names its tasks after request reprs and replays diverged.
+- HTTP/2, httpx/httpcore 1.0.9 client against Hypercorn 0.18.0: bodies
+  intact under resets and cancellations; httpcore leaks a connection when
+  a request waiting for a connecting HTTP/2 connection is cancelled (new,
+  confirmed on plain asyncio, not reported); Hypercorn handlers stuck in
+  `send()` after a reset rediscover its open #390. New API:
+  `Host.connections` lists a host's open TCP connections, for leak checks.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

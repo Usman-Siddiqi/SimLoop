@@ -1643,6 +1643,82 @@ here. Rules (see `CLAUDE.md`):
   to one resource) and #273 (Request-Tag for simultaneous requests not
   implemented). No issue found for mixed Block2 answers. Not reported.
 
+### 36. httpcore 1.0.9: a request cancelled while its HTTP/2 connection is being set up leaks that connection
+
+- **Library:** [httpcore](https://pypi.org/project/httpcore/) 1.0.9 (latest
+  release), through [httpx](https://pypi.org/project/httpx/) 0.28.1 with
+  `http2=True` (`AsyncConnectionPool`, `AsyncHTTPConnection`).
+- **Reproduction:** [`findings/http2_httpx_hypercorn.py`](../findings/http2_httpx_hypercorn.py)
+  (the SimLoop harness against a Hypercorn server, a fix control, and a
+  plain-asyncio reproduction).
+- **Seeds:** six tasks POST up to 100 KB six times each over one
+  `httpx.AsyncClient(http1=False, http2=True)` to a Hypercorn echo app,
+  0.5-5 ms latency. Seeds 0-29, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`, `strict_cancellation=True`, `step_time=1e-6`.
+  Clean with no faults. With 40% of requests under `asyncio.wait_for`,
+  the client still has a TCP connection open after `aclose()` in 5 / 30
+  runs (seeds 3, 10, 15, 16, 26) and 9 / 30 (first seed 3). With the
+  control, all 60 pass. The check uses `Host.connections`, added to
+  SimLoop for this.
+- **Property violated:** closing the client closes every connection it
+  opened.
+- **Explanation:** concurrent requests are assigned to one new HTTP/2
+  connection while it is still connecting (`is_available()` is True for a
+  connecting HTTP/2-only connection). The first request connects inside
+  `async with self._request_lock`, and the others wait on that lock.
+  `AsyncHTTPConnection.handle_async_request` sets `_connect_failed = True`
+  on any exception raised in that block, so a request cancelled while it
+  merely waits marks the connection as failed. `is_closed()` then returns
+  True, and `_assign_requests_to_connections` removes the connection from
+  the pool as already closed, without closing it, while the first request
+  finishes connecting and goes on using it. Nothing references the socket
+  after that: `aclose()` never closes it, and the server keeps the
+  connection (and any handler reading from it) until it times out, if
+  ever. A connect cancelled while another request waits has the same end:
+  the waiter then connects on the connection the pool already dropped.
+
+  On plain asyncio, against Hypercorn on localhost: two `client.get()`
+  tasks start together, and the second is cancelled after three loop
+  iterations. The first request succeeds over HTTP/2, the pool is empty,
+  and after `client.aclose()` its socket is still open. Without the
+  cancellation the pool holds the connection and `aclose()` closes it.
+- **Impact:** medium: every such cancellation leaks a connection, in the
+  client and in the server, for the life of the process; timeouts around
+  concurrent HTTP/2 requests to a new origin are enough.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** no matching issue found. Open #1093 / PR #1099
+  cover a different cancellation leak (an HTTP/1.1 connection left
+  `CONNECTING` holds a pool slot); #1099 relies on this same
+  `_connect_failed` path, which is the problem for HTTP/2. Not reported.
+
+### 37. Hypercorn 0.18.0: an HTTP/2 handler sending a response when the connection drops never returns from `send()` (known upstream)
+
+- **Library:** [Hypercorn](https://pypi.org/project/hypercorn/) 0.18.0
+  (latest release) with h2 4.4.1, asyncio worker, HTTP/2 prior knowledge.
+- **Reproduction:** the same script,
+  [`findings/http2_httpx_hypercorn.py`](../findings/http2_httpx_hypercorn.py),
+  with a control that closes stream buffers.
+- **Seeds:** the workload of #36 with 0.2% TCP resets per segment
+  instead of cancellations. A handler is still running after the faults
+  stop and the client is closed in 13 / 30 runs (first seed 0) and 15 / 30
+  (first seed 0). With the control, all 60 pass; with both controls, the
+  mix of resets and cancellations passes too.
+- **Property violated:** a handler whose connection is gone finishes.
+- **Explanation:** a handler sending a large body waits in
+  `StreamBuffer.push` for the send task to drain its stream's buffer.
+  `H2Protocol.handle(Closed())` marks the protocol closed and closes the
+  HTTP streams (the app is told `http.disconnect`), but not the entries of
+  `stream_buffers`, so the waiting `send()` never returns. The connection's
+  task group then waits for that handler forever.
+- **Impact:** medium: each lost connection during a streaming response
+  leaks a task and its buffered body, and graceful shutdown cannot finish.
+- **Feasibility:** reproduces with asyncio's FIFO order plus timer jitter
+  (15 / 30 above), and the upstream report reproduces it on a real loop
+  after a TCP abort.
+- **Upstream status:** known: pgjones/hypercorn#390 (open, 2026-10-27),
+  which describes this and the related missing backpressure.
+  Rediscovered; not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

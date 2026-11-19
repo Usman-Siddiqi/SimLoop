@@ -272,6 +272,7 @@ db.crash(power_loss=True)                      # peers hear nothing
 db.restart()
 db.pause(2.0)                                  # a GC pause or a stalled VM
 db.clock_offset = 30.0                         # this host's time.time() is skewed
+db.connections                                 # open TCP connections: leak checks
 ```
 
 TCP is ordered and reliable like the real thing: a dropped segment shows up
@@ -569,6 +570,8 @@ against the pinned versions.
 | [aiosmtplib](https://pypi.org/project/aiosmtplib/) | 5.1.3 | A command cancelled while waiting for its reply (say by `asyncio.wait_for` around `send_message`) leaves the reply in flight, so it answers the next command and every later reply is one command late: the next, uncancelled send is refused with `503 nested MAIL` ([script](findings/aiosmtplib_cancel_desync.py)) | Known: fixed on main for 5.1.4 (unreleased); rediscovered, not reported |
 | [amqtt](https://pypi.org/project/amqtt/) | 0.12.2 | A client that reconnects mid-way through a QoS 2 delivery drops the `PUBREL` the broker re-sends right after `CONNACK`, so the message is never delivered and no `PUBCOMP` is sent; `publish()` raises `CancelledError` into a caller nobody cancelled when the connection drops before the acknowledgement ([script](findings/amqtt_qos2_resume.py)) | No upstream issue found; not reported |
 | [aiocoap](https://pypi.org/project/aiocoap/) | 0.4.17 | Two concurrent requests from one client to one resource whose answers need several blocks share the server's Block2 cache entry, so one caller gets a body made partly of the other request's answer, with no error ([script](findings/aiocoap_block2_mixup.py)) | Related open issues #58 and #273 (concurrent block-wise operations); not reported |
+| [httpcore](https://pypi.org/project/httpcore/) (httpx, HTTP/2) | 1.0.9 | A request cancelled while it waits for a new HTTP/2 connection to finish connecting marks that connection failed; the pool drops it without closing it while another request keeps using it, so the socket outlives `aclose()` ([script](findings/http2_httpx_hypercorn.py)) | No upstream issue found; not reported |
+| [Hypercorn](https://pypi.org/project/hypercorn/) | 0.18.0 | An HTTP/2 handler that is sending a response when the connection drops never returns from `send()`, so its task and the connection's task group never finish ([script](findings/http2_httpx_hypercorn.py)) | Known: open issue #390; rediscovered, not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests;
