@@ -1,4 +1,4 @@
-"""redis-py 8.1.0 RedisCluster: aclose() may close nothing; reinitialize_steps=1 fails MOVED.
+"""redis-py 8.1.0 RedisCluster: aclose() leaks, MOVED and ASK redirects end in "TTL exhausted".
 
 A simulated Redis Cluster (``_resp_cluster``: three primaries with
 synchronously replicated replicas, ``MOVED``/``ASK``/``TRYAGAIN``, slot
@@ -30,6 +30,18 @@ with the stale slot map, gets MOVED again, closes again, and so on until
 "TTL exhausted" is raised to the caller: every command that meets a moved
 slot fails. Known upstream: fixed by #4322 (merged after the release),
 which initializes after closing; doing that passes.
+
+``ASK`` (a slot mid-migration, its key already on the importing node): the
+client sends ``ASKING`` and then the command as two separate
+``ClusterNode.execute_command`` calls, and each takes a connection from the
+node's pool. ``ASKING`` only applies to the next command on its own
+connection, and the pool hands connections out first in, first out, so once
+the importing node has two idle connections the command goes out on the
+other one, without ``ASKING``. The node answers ``MOVED`` back to the old
+owner, which answers ``ASK`` again, until "TTL exhausted". Slow migrations
+(as ``redis-cli --cluster reshard`` runs them) fail commands this way;
+sending ``ASKING`` and the command together on one connection passes. Still
+the code on master.
 
 Run: python findings/redis_cluster.py
 """
@@ -69,6 +81,14 @@ WORKLOADS: dict[str, dict[str, Any]] = {
         "batch": 4,
         "fix": ("aclose",),
     },
+    "slow migrations": {"migrate": 0.9, "pause": (0.05, 0.4), "fix": ("aclose",)},
+    "slow migrations, pipelines, wait_for, ASKING fixed": {
+        "migrate": 0.9,
+        "pause": (0.05, 0.4),
+        "pipe": 0.5,
+        "cancel": 0.2,
+        "fix": ("aclose", "asking"),
+    },
     "migrations, reinitialize_steps=1": {"migrate": 0.8, "steps": 1},
     "migrations, reinitialize_steps=1, both fixed": {
         "migrate": 0.8,
@@ -79,6 +99,7 @@ WORKLOADS: dict[str, dict[str, Any]] = {
 FAILING = {
     # A client dropped with its connections open is also reported when collected.
     "failovers, a client per batch": ("connections left open", "Unclosed ClusterNode"),
+    "slow migrations": ("TTL exhausted",),
     "migrations, reinitialize_steps=1": ("TTL exhausted",),
 }
 
@@ -121,7 +142,8 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
                 if roll < knobs.get("migrate", 0.0):
                     slot = rng.choice(hot)
                     others = [p for p in sorted(set(cluster.owner)) if p != cluster.owner[slot]]
-                    await cluster.migrate(slot, rng.choice(others), pause=(0.0, 0.02))
+                    pause = knobs.get("pause", (0.0, 0.02))
+                    await cluster.migrate(slot, rng.choice(others), pause=pause)
                 elif roll < knobs.get("migrate", 0.0) + knobs.get("failover", 0.0):
                     victim = rng.choice(sorted(set(cluster.owner)))
                     await cluster.failover(victim, rng.uniform(0.2, 1.5))
@@ -133,6 +155,16 @@ def make_harness(knobs: dict[str, Any]) -> Callable[[], Coroutine[Any, Any, None
             token = f"{n}-{i}".encode()
             try:
                 unknown[key].add(token)
+                if rng.random() < knobs.get("pipe", 0):
+                    async with client.pipeline(transaction=knobs.get("tx", False)) as pipe:
+                        pipe.set(key, token)
+                        pipe.get(key)
+                        replies = await pipe.execute()
+                    unknown[key].discard(token)
+                    if replies[1] != token:
+                        wrong.append(f"{key!r}: pipelined SET {token!r}, GET gave {replies}")
+                    last[key] = {token}
+                    return
                 if rng.random() < knobs.get("cancel", 0):
                     try:
                         await asyncio.wait_for(client.set(key, token), rng.uniform(0, 0.02))
@@ -240,6 +272,40 @@ def fix_moved() -> Callable[[], None]:
     return undo
 
 
+def fix_asking() -> Callable[[], None]:
+    """Send ASKING on the connection that carries the redirected command."""
+    original = ClusterNode.execute_command
+    pending: contextvars.ContextVar[ClusterNode | None] = contextvars.ContextVar(
+        "pending_asking", default=None
+    )
+
+    async def execute_command(self: Any, *args: Any, asking: bool = False, **kwargs: Any) -> Any:
+        if args == ("ASKING",):
+            pending.set(self)
+            return b"OK"
+        if pending.get() is not self:
+            return await original(self, *args, asking=asking, **kwargs)
+        pending.set(None)
+        connection = self.acquire_connection()
+        try:
+            await self.disconnect_if_needed(connection)
+            await connection.send_packed_command(connection.pack_commands([("ASKING",), args]))
+            await connection.read_response()
+            return await self.parse_response(connection, args[0], **kwargs)
+        finally:
+            try:
+                await self.disconnect_if_needed(connection)
+            finally:
+                self.release(connection)
+
+    ClusterNode.execute_command = execute_command  # type: ignore[method-assign]
+
+    def undo() -> None:
+        ClusterNode.execute_command = original  # type: ignore[method-assign]
+
+    return undo
+
+
 def open_sessions() -> int:
     return sum(1 for task in asyncio.all_tasks() if "RespServer.handle" in repr(task.get_coro()))
 
@@ -270,6 +336,25 @@ async def plain(port: int, scenario: str) -> str:
             outcome = "GET answered"
         except RedisError as exc:
             outcome = f"GET raised {type(exc).__name__}"
+    elif scenario == "ask":
+        key = keys[0]
+        slot = key_slot(key)
+        source = cluster.owner[slot]
+        target = next(n for n in names if n != source)
+        # Two concurrent commands leave the importing node with two pooled connections.
+        on_target = [k for k in keys if cluster.owner[key_slot(k)] == target][:2]
+        await asyncio.gather(*(client.get(k) for k in on_target))
+        pooled = len(client.get_node(*cluster.endpoint(target))._connections)
+        # Mid-migration, as redis-cli --cluster reshard leaves it: the key already moved.
+        cluster.migrating[slot] = (source, target)
+        cluster.nodes[target].adopt(cluster.nodes[source], key)
+        cluster.nodes[source].remove(key)
+        try:
+            outcome = f"GET answered {await client.get(key)!r}"
+        except RedisError as exc:
+            outcome = f"GET raised {type(exc).__name__}: {exc}"
+        outcome += f" with {pooled} pooled connections; redirects {dict(cluster.redirects)}"
+        cluster.migrating.pop(slot)
     else:
         for key in keys[:5]:
             slot = key_slot(key)
@@ -294,7 +379,7 @@ async def plain(port: int, scenario: str) -> str:
 def main() -> int:
     configs = [("random", simloop.SimConfig(step_time=1e-6))]
     configs.append(("fifo", configs[0][1].replace(scheduler="fifo", timer_jitter=0.001)))
-    fixes = {"aclose": fix_aclose, "moved": fix_moved}
+    fixes = {"aclose": fix_aclose, "moved": fix_moved, "asking": fix_asking}
     for workload, knobs in WORKLOADS.items():
         undos = [fixes[fix]() for fix in knobs.get("fix", ())]
         try:
@@ -319,6 +404,9 @@ def main() -> int:
     exhausted = asyncio.run(plain(17120, "steps=1"))
     print(f"real asyncio loop, reinitialize_steps=1: {exhausted}")
     assert "TTL exhausted" in exhausted, exhausted
+    asked = asyncio.run(plain(17130, "ask"))
+    print(f"real asyncio loop, a key mid-migration: {asked}")
+    assert "TTL exhausted" in asked, asked
     return 0
 
 

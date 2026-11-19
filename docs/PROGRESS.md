@@ -236,6 +236,16 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   master after the release), and `reinitialize_steps=1` fails moved
   commands with "TTL exhausted" (known, #4322). Both confirmed on plain
   asyncio, not reported.
+- redis-py 8.1.0 `RedisCluster` during slow slot migrations: `ASKING` and
+  the redirected command go out on different pooled connections, so the
+  importing node answers `MOVED` and the command fails with "TTL
+  exhausted" (still on master; confirmed on plain asyncio, not reported).
+  The async cluster transaction (`pipeline(transaction=True)`) runs
+  `asyncio.run` in a thread per command, so SimLoop rejects it
+  ("nondeterminism: threading.Thread.start"); not covered.
+- Clean: coredis 6.9.0 `RedisCluster` against the same cluster (RESP3,
+  `CONFIG GET` added to the simulator) under migrations, failovers,
+  resets, cancellations and pipelines.
 - Framework fixes found by that harness: a full garbage collection before
   each run (an earlier run's objects promoted to the oldest generation
   were finalized inside the next run, which made replays diverge), and a

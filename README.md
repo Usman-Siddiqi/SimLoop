@@ -577,6 +577,7 @@ against the pinned versions.
 | [asyncua](https://pypi.org/project/asyncua/) | 2.1.0 | A connection lost while a reconnect recreates a subscription leaves it monitoring nothing on the server, so data changes stop for good while the client reports itself reconnected ([script](findings/asyncua_reconnect.py)) | No upstream issue found; not reported |
 | [redis-py](https://pypi.org/project/redis/) | 8.1.0 | An asyncio `RedisCluster` closed after a failed command (or right after its `reinitialize_steps`-th `MOVED`) keeps every connection open, since `aclose()` mistakes the refresh flag for "already closed" ([script](findings/redis_cluster.py)) | Fixed on master after the release; no issue found; not reported |
 | [redis-py](https://pypi.org/project/redis/) | 8.1.0 | With `reinitialize_steps=1`, every asyncio `RedisCluster` command that meets a moved slot fails with "TTL exhausted" ([script](findings/redis_cluster.py)) | Known: fixed by #4322 after the release; rediscovered, not reported |
+| [redis-py](https://pypi.org/project/redis/) | 8.1.0 | During a slot migration, an asyncio `RedisCluster` sends `ASKING` and the redirected command on different pooled connections, so commands on keys that already moved fail with "TTL exhausted" ([script](findings/redis_cluster.py)) | Still on master; no issue found; not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests;

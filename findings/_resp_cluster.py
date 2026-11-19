@@ -76,6 +76,7 @@ _TABLE: dict[bytes, tuple[int, tuple[bytes, ...], int, int, int]] = {
     b"asking": (1, (b"fast",), 0, 0, 0),
     b"readonly": (1, (b"fast",), 0, 0, 0),
     b"readwrite": (1, (b"fast",), 0, 0, 0),
+    b"config": (-2, (b"admin",), 0, 0, 0),
 }
 COMMAND_REPLY = [
     [name, arity, list(flags), first, last, step]
@@ -102,6 +103,7 @@ class Cluster:
         port: int = 6379,
         *,
         addresses: dict[str, tuple[str, int]] | None = None,
+        resp3: bool = False,
     ) -> None:
         self.port = port
         # Outside a simulation all nodes share one host, so each needs its own port.
@@ -113,11 +115,11 @@ class Cluster:
         self.redirects: collections.Counter[str] = collections.Counter()
         share = SLOTS // len(primaries)
         for index, name in enumerate(primaries):
-            self.nodes[name] = ClusterServer(self, name)
+            self.nodes[name] = ClusterServer(self, name, resp3=resp3)
             end = SLOTS if index == len(primaries) - 1 else (index + 1) * share
             self.owner.extend([name] * (end - len(self.owner)))
         for primary, replica in zip(primaries, replicas or [], strict=False):
-            node = ClusterServer(self, replica)
+            node = ClusterServer(self, replica, resp3=resp3)
             node.share_keyspace(self.nodes[primary])
             self.nodes[replica] = node
             self.replica_of[replica] = primary
@@ -211,8 +213,8 @@ class Cluster:
 class ClusterServer(RespServer):
     """One cluster node: routing checks in front of a ``RespServer``."""
 
-    def __init__(self, cluster: Cluster, name: str) -> None:
-        super().__init__()
+    def __init__(self, cluster: Cluster, name: str, *, resp3: bool = False) -> None:
+        super().__init__(resp3=resp3)
         self.cluster = cluster
         self.name = name
 
@@ -247,6 +249,9 @@ class ClusterServer(RespServer):
             if sub == b"MYID":
                 return self.cluster.node_id(self.name)
             return Exception(f"unknown subcommand '{sub.decode()}'")
+        if name == b"CONFIG" and command[1].upper() == b"GET":
+            known = {b"cluster-require-full-coverage": b"yes"}
+            return [x for k, v in known.items() if k == command[2].lower() for x in (k, v)]
         if name == b"COMMAND":
             return COMMAND_REPLY if len(command) == 1 else Exception("unsupported")
         keys = command_keys(command)

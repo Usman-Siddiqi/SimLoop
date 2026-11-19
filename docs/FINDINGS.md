@@ -1909,6 +1909,53 @@ here. Rules (see `CLAUDE.md`):
 - **Upstream status:** known: fixed by #4322 (merged 2026-09-24, after
   8.1.0); rediscovered, not reported.
 
+### 43. redis-py 8.1.0: an asyncio `RedisCluster` sends `ASKING` on one connection and the command on another, so commands on a migrating slot fail with "TTL exhausted"
+
+- **Library:** redis 8.1.0, `redis.asyncio.cluster.RedisCluster` (the same
+  code since at least 5.0.0, and on master).
+- **Reproduction:** [`findings/redis_cluster.py`](../findings/redis_cluster.py)
+  (workload "slow migrations", its control "slow migrations, pipelines,
+  wait_for, ASKING fixed", and a plain-asyncio reproduction).
+- **Seeds:** the harness of #41 with one shared client while slots migrate
+  slowly (0.05-0.4 s between keys, as `redis-cli --cluster reshard` moves
+  them), with the `aclose()` fix applied so that #41 does not interfere.
+  19 / 30 runs fail under the random scheduler (first seed 0) and 12 / 30
+  under fifo with jitter, with `ClusterError: TTL exhausted.` With
+  `ASKING` and the command written together on one connection, all 60
+  pass, also with pipelines and `wait_for` cancellations.
+- **Property violated:** an `ASK` redirect is followed transparently: the
+  command is answered by the node importing the slot.
+- **Explanation:** while a slot migrates, its owner answers `ASK` for keys
+  it no longer has, and the importing node serves such a key only if the
+  command comes right after `ASKING` *on the same connection* (`ASKING` sets
+  a one-shot flag on the connection). Otherwise it answers `MOVED` back to
+  the owner. `RedisCluster._execute_command` handles `ASK` with
+  `await target_node.execute_command("ASKING")` and then
+  `target_node.execute_command(*args)`, and each call takes a connection
+  from the node's pool and gives it back. The pool is first in, first out
+  (`_free.popleft()`, `_free.append()`), so as soon as the importing node
+  has two idle connections, which any two concurrent commands to it leave
+  behind, `ASKING` goes out on one and the command on the other. The
+  command gets `MOVED`, the owner answers `ASK` again, and so on until the
+  redirect budget (16) runs out. The synchronous `redis.cluster` client
+  sends `ASKING` on the command's connection, and so does coredis (see
+  "Tested, nothing found"). Master special-cases `HIMPORT SET` with a
+  comment saying `ASKING` "must sit on the same connection", but still
+  sends it separately for every other command.
+
+  On plain asyncio (a cluster of three `_resp_cluster` nodes on
+  localhost): after two concurrent `GET`s to the importing node, a slot is
+  put mid-migration with its key already moved; the next `GET` of that key
+  raises "TTL exhausted" after 8 `ASK` and 8 `MOVED` replies. With the fix
+  it is answered after one `ASK`.
+- **Impact:** medium to high for clusters that are resharded or rebalanced
+  while serving traffic: every command on a key that has already moved
+  fails until the slot's migration finishes, which on a large slot can take
+  a long time. Clients with a single connection per node are not affected.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** searched redis/redis-py issues and pull requests
+  (#4015 is a different `ASK` failure); no match found. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
@@ -2115,6 +2162,16 @@ properties and fault mixes only.
   same mix against `BlockingConnectionPool` (`max_connections=2`, six
   workers, pool timeout none, 50 ms or 1 s) was clean too: never more than
   2 connections, none stuck in use, 200 seeds each, random and fifo.
+- **coredis 6.9.0 `RedisCluster`**, [`findings/coredis_cluster.py`](../findings/coredis_cluster.py):
+  the cluster harness of #41 to #43 (RESP3), with fast and slow slot
+  migrations, failovers to replicas, 0.2% TCP resets per segment,
+  `wait_for` cancellations and non-transactional pipelines. Every read
+  returned the latest acknowledged write or one whose outcome was unknown,
+  pipelined `GET`s saw their `SET`, no command ran out of redirects, every
+  key held such a value after the faults, and closing the client closed
+  every connection (30 seeds per workload, random and fifo). It sends
+  `ASKING` on the redirected command's connection. The pool bugs of #11
+  are in the single-node pool and did not show here.
 - **aiohttp 3.14.5**, [`findings/aiohttp_pool.py`](../findings/aiohttp_pool.py):
   every response matched its request, the pool served `limit` concurrent
   requests after faults stopped, and no connection stayed acquired, across
