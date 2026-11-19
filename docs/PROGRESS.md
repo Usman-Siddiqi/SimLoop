@@ -193,6 +193,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   The first harness version saw misdelivered mail that depended on the
   old per-segment reads. Every findings script was re-run on the new
   transport.
+- amqtt 0.12.2 (broker and client, persistent sessions, TCP resets): a
+  client resuming a QoS 2 delivery drops the `PUBREL` the broker re-sends
+  right after `CONNACK` (message lost, no `PUBCOMP`), and `publish()`
+  raises `CancelledError` into its caller when the connection drops; the
+  broker also delivers at the subscription's QoS rather than the minimum.
+  All confirmed on plain asyncio, not reported. Runs in its own
+  environment (amqtt pins websockets 15).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

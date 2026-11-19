@@ -1533,6 +1533,73 @@ here. Rules (see `CLAUDE.md`):
   together; SimLoop now delivers such data in one read (see the progress
   log), and only the refusal above remains.
 
+### 34. amqtt 0.12.2: a QoS 2 message is lost when the broker re-sends its PUBREL right after CONNACK; `publish()` raises `CancelledError` on a lost connection
+
+- **Library:** [amqtt](https://pypi.org/project/amqtt/) 0.12.2 (latest
+  release), the MQTT client (`MQTTClient`) and broker (`Broker`).
+- **Reproduction:** [`findings/amqtt_qos2_resume.py`](../findings/amqtt_qos2_resume.py)
+  (the SimLoop harness, a fix control for each problem, and plain-asyncio
+  reproductions against a scripted broker). It runs in its own
+  environment ([`requirements-amqtt_qos2_resume.txt`](../findings/requirements-amqtt_qos2_resume.txt)):
+  amqtt pins `websockets==15.0.1`.
+- **Seeds:** an amqtt broker; a subscriber on `t/#` at QoS 2 and three
+  publishers (eight messages each, QoS 1 or 2), all with persistent
+  sessions, a username (the broker keeps no state for anonymous clients)
+  and automatic reconnects; keep-alive 5 s. Seeds 0-39, default scheduler
+  / `scheduler="fifo", timer_jitter=0.001`, `step_time=1e-6`. Clean with
+  no faults. With 2% TCP resets per segment, a message whose `publish()`
+  returned never reaches the subscriber in 4 / 40 runs (seeds 15, 33, 34,
+  36) and 5 / 40 (seeds 4, 13, 21, 31, 34), and a publisher nobody
+  cancelled gets `CancelledError` in 32 / 40 (first seed 0) and 30 / 40
+  (first seed 1). With each fix control, all 80 runs of that workload
+  pass.
+- **Property violated:** QoS 2 delivers exactly once across reconnects of
+  a persistent session; a receiver answers every `PUBREL` with `PUBCOMP`
+  (MQTT 3.1.1, section 4.3.3); a caller that is not cancelled gets an
+  ordinary error.
+- **Explanation:** a client that has answered a QoS 2 `PUBLISH` with
+  `PUBREC` keeps the message in `session.inflight_in` until `PUBREL`. On a
+  reconnect the broker re-sends the unacknowledged `PUBREL` straight after
+  `CONNACK`, as [MQTT-4.4.0-1] requires. When both arrive in one read
+  (the broker writes them back to back), the client's reader task
+  dispatches the `PUBREL` before
+  `ProtocolHandler._retry_deliveries` has started the flow that waits for
+  it, and `handle_pubrel` without a waiter only logs "Received PUBREL for
+  unknown pending message" and drops it. The message is never delivered,
+  no `PUBCOMP` goes back, the broker gives up after its `PUBCOMP` timeout,
+  and the retry flow waits ten seconds for a `PUBREL` that already came
+  (blocking `connect()` long enough that the broker's keep-alive drops the
+  connection again). The retry logic is new in 0.12 (PR #402), and the
+  main branch has the same `handle_pubrel`.
+
+  Separately, when the connection drops while `publish()` waits for its
+  `PUBACK`, `PUBREC` or `PUBCOMP`, `ProtocolHandler.stop()` cancels the
+  waiter, and `publish()` raises that `CancelledError` into its caller:
+  `except Exception` misses it, a `TaskGroup` or `gather` treats it as a
+  cancellation, and a publishing loop ends as if it had been cancelled.
+
+  On plain asyncio, against a scripted broker: a client receives a QoS 2
+  `PUBLISH`, answers `PUBREC`, and the connection drops; the broker
+  resumes with `CONNACK` (session present) and `PUBREL` in one write. The
+  message is never delivered and the broker never sees `PUBCOMP`. If the
+  broker sends `PUBREL` only after the client's `PUBREC`, the message is
+  delivered and `PUBCOMP` comes back. A broker that drops the connection
+  before acknowledging a QoS 1 publish makes `publish()` raise
+  `CancelledError` in a task that was never cancelled.
+- **Also seen while writing the harness:** the broker delivers each
+  message at the subscription's QoS instead of the minimum of the
+  publish and subscription QoS [MQTT-3.8.4-6]: a QoS 2 subscriber gets
+  QoS 0, 1 and 2 publishes all at QoS 2 (checked on a real loop by the
+  script). That is how QoS 1 publishes are lost the same way above.
+- **Impact:** high for the QoS 2 loss (exactly-once delivery loses
+  messages after an ordinary reconnect, against any broker that resumes
+  the session promptly); medium for the `CancelledError`.
+- **Feasibility:** both deterministic on plain asyncio (the script above).
+- **Upstream status:** no matching issue found. #100 (2022, closed)
+  reported "Received PUBREL for unknown pending message" warnings with
+  repeated packets, and #401 / PR #402 added the retry this race is in.
+  Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
