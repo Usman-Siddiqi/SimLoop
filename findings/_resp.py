@@ -35,22 +35,37 @@ async def read_command(reader: asyncio.StreamReader) -> list[bytes] | None:
     return args
 
 
+# Reply to HELLO 3 for RESP3-only clients; every other reply is the same in RESP2.
+HELLO3 = (
+    b"%7\r\n+server\r\n+redis\r\n+version\r\n+7.2.0\r\n+proto\r\n:3\r\n+id\r\n:1\r\n"
+    b"+mode\r\n+standalone\r\n+role\r\n+master\r\n+modules\r\n*0\r\n"
+)
+
+
 class RespServer:
     """GET/SET/INCR/DEL/ECHO/PING plus enough handshake commands for clients.
 
     ``slow`` adds a random processing delay per command, which is what turns a
-    client timeout into a late reply on a reused connection.
+    client timeout into a late reply on a reused connection; ``delay`` adds a
+    fixed one (usable outside a simulation). ``resp3`` answers ``HELLO 3``.
     """
 
-    def __init__(self, slow: float = 0.0) -> None:
+    def __init__(self, slow: float = 0.0, *, delay: float = 0.0, resp3: bool = False) -> None:
         self.slow = slow
+        self.delay = delay
+        self.resp3 = resp3
         self.data: dict[bytes, bytes] = {}
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             while (command := await read_command(reader)) is not None:
+                if self.resp3 and command[0].upper() == b"HELLO":
+                    writer.write(HELLO3)
+                    continue
                 if self.slow:
                     await asyncio.sleep(simloop.rng().uniform(0, self.slow))
+                elif self.delay:
+                    await asyncio.sleep(self.delay)
                 writer.write(encode(self.execute(command)))
                 await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError):

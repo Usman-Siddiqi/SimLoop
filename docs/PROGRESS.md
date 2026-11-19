@@ -22,7 +22,15 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   by the generic check). aiomcache 0.8.2: a cancelled command leaves its
   reply for the next command on the pooled connection, and a connection
   dropped mid-command strands a caller waiting in the pool (both fixed on
-  the upstream default branch, unreleased; rediscovered).
+  the upstream default branch, unreleased; rediscovered). coredis 6.9.0:
+  each cancelled pipeline leaks a connection-pool slot, and a caller that
+  gives up waiting for a connection swallows the next caller's wakeup;
+  either way commands hang forever (confirmed on real asyncio, unfixed
+  upstream, not reported). `findings/_resp.py` now answers `HELLO 3` and
+  takes a fixed `delay` for plain-asyncio repros. A scratch run of the
+  redis-py reply-integrity harness against valkey-py 6.2.0 was clean (500
+  seeds, random and fifo, with `strict_cancellation`); not kept as a
+  harness.
 - 232 tests.
 
 ### In progress

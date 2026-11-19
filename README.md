@@ -530,9 +530,12 @@ against the pinned versions.
 | [aiodataloader](https://pypi.org/project/aiodataloader/) | 0.4.3 | One caller's cancellation cancels the cached future every caller of the key shares, so concurrent callers get `CancelledError`, and the cancelled future stays cached, so later loads of the key fail too ([script](findings/aiodataloader_shared_future.py)) | No matching upstream issue found; not reported |
 | [strawberry-graphql](https://pypi.org/project/strawberry-graphql/) | 0.341.2 | One caller's cancellation makes every concurrent `DataLoader.load` of the same key raise `CancelledError` ([script](findings/strawberry_dataloader_cancel.py)) | Already known upstream (open PR #4803); rediscovered from a generic check |
 | [aiomcache](https://pypi.org/project/aiomcache/) | 0.8.2 | A cancelled command leaves its reply on the pooled connection, so later commands read each other's replies (`get` returns `None` or a stale value); a connection dropped mid-command leaves a caller waiting in the pool forever ([script](findings/aiomcache_cancel_desync.py)) | Fixed on the upstream default branch (#489, PR #510), not yet released; rediscovered |
+| [coredis](https://pypi.org/project/coredis/) | 6.9.0 | Each cancelled pipeline permanently removes a slot from the connection pool, and a caller that gives up waiting for a connection swallows the next caller's wakeup; either way later commands wait forever ([script](findings/coredis_pool_hangs.py)) | No upstream issue found (a matching PR, #436, was closed unmerged by its author); not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
-one execution per key; one task inside a lock; balanced cancel requests)
+one execution per key; one task inside a lock; balanced cancel requests;
+a reply goes to the request that asked for it; a caller that is not
+cancelled gets its result)
 that SimLoop breaks by searching schedules, timings and cancellations. The
 aiotools leak was first spotted while reading the code; the generic
 `strict_cancellation` check now finds it without aiotools-specific

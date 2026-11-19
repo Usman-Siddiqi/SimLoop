@@ -341,6 +341,62 @@ here. Rules (see `CLAUDE.md`):
   connection (no separate issue about the hang found). Listed as a
   rediscovery; users of the PyPI release are still affected.
 
+### 11. coredis 6.9.0: cancellation leaks pool slots and loses pool wakeups, so commands hang forever
+
+- **Library:** [coredis](https://pypi.org/project/coredis/) 6.9.0 (latest
+  release on 2026-11-19; `pool/_basic.py` and `_concurrency.py` are
+  unchanged on the upstream default branch), `Redis` with its default
+  `ConnectionPool`.
+- **Reproduction:** [`findings/coredis_pool_hangs.py`](../findings/coredis_pool_hangs.py)
+  (two plain-asyncio reproductions against a local RESP3 server, plus the
+  SimLoop harness against the simulated one in `findings/_resp.py`).
+- **Seeds:** 4 workers sending `ECHO`s and 2-command pipelines, 30% of them
+  under a random `wait_for` timeout, `max_connections` 1-3, no network
+  faults; "every request finishes within 30 s" fails on 450 of seeds 0-499
+  with the default scheduler (235 with a free connection in the pool, first
+  seed 0; 215 with every slot gone, first seed 4) and on 433 with
+  `scheduler="fifo", timer_jitter=0.001` (230, first seed 3; 203, first
+  seed 4).
+- **Property violated:** a command gets a connection once one is free, and
+  the pool keeps `max_connections` slots.
+- **Explanation:** two separate defects.
+  1. *Slot leak.* The pool's queue starts with `max_connections` `None`
+     placeholders, each a slot. A pipeline keeps its connection while it
+     waits for the replies; cancelling it invalidates the connection (so a
+     half-read reply is never reused), and the pipeline's cleanup calls
+     `release`, which only puts back a connection that is still usable. The
+     connection's own exit path restores a placeholder only for a
+     connection that is sitting in the queue, which this one is not. Each
+     cancelled pipeline therefore removes a slot for good; after
+     `max_connections` of them (64 by default) every command waits forever,
+     since the pool's `timeout` defaults to `None`. Blocking commands are
+     sent with `disconnect_on_cancellation=should_block` and look exposed
+     to the same leak when cancelled (from reading the code; not exercised
+     here).
+  2. *Lost wakeup.* `coredis._concurrency.Queue.get` takes the queue's lock,
+     appends an `Event` to `_getters` and waits on it. A caller cancelled
+     while waiting (its own timeout, a disconnect) leaves its event in
+     `_getters`. The next `put` pops and sets that stale event; the caller
+     now waiting holds the lock and is never woken, and every later caller
+     queues behind the lock, while a free connection sits in the pool.
+
+  On plain asyncio: with `max_connections=2`, two pipelines cancelled by a
+  10 ms timeout leave 0 slots and the next `ECHO` is still waiting 2 s
+  later; with `max_connections=1`, one caller that gives up after 10 ms
+  waiting for the connection leaves the next caller waiting 2 s later with
+  1 free connection in the pool. A related effect seen once (fifo seed 236
+  with `max_connections=64`): a cancelled pipeline also fails an `ECHO`
+  multiplexed on the same connection with `ConnectionError: Connection
+  lost!`, with no network fault.
+- **Feasibility:** both reproduce with `asyncio.run` and fixed sleeps over
+  real localhost sockets.
+- **Upstream status:** searched alisaifee/coredis issues and pull requests
+  on 2026-11-19. For the slot leak, pull request #436 ("fix: restore pool
+  slot when releasing an unusable connection") was opened and closed by its
+  author 29 seconds later without comments or a merge, and no issue exists;
+  the default branch still has the bug. Nothing found for the lost wakeup.
+  Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
