@@ -81,6 +81,13 @@ _CAPTURABLE: dict[int, object] = {
         time.perf_counter_ns,
         time.sleep,
         os.urandom,
+        socket.gethostname,
+        socket.getfqdn,
+        socket.gethostbyname,
+        socket.gethostbyname_ex,
+        socket.gethostbyaddr,
+        socket.getaddrinfo,
+        socket.getnameinfo,
         *([_fcntl.fcntl] if _fcntl is not None else []),
     )
 }
@@ -95,6 +102,10 @@ _KEEP_REAL = frozenset(sys.stdlib_module_names) | {
     "coverage",
 }
 _captured_scanned: set[str] = set()
+
+
+def _no_fqdn(name: str = "") -> str:
+    return name.strip() or "main"
 
 
 class _Ref:
@@ -285,9 +296,19 @@ class Sandbox:
         if _fcntl is not None:
             patches.append((_fcntl, "fcntl", virtual_fcntl(network, _fcntl.fcntl)))
         if network is None:
+            # No simulated hosts to resolve, but the machine's own name must
+            # not leak into a run either.
+            patches += [(socket, "gethostname", lambda: "main"), (socket, "getfqdn", _no_fqdn)]
             return patches
         selector = VirtualSelect(network)
         patches += [
+            (socket, "gethostname", network.gethostname),
+            (socket, "getfqdn", network.getfqdn),
+            (socket, "gethostbyname", network.gethostbyname),
+            (socket, "gethostbyname_ex", network.gethostbyname_ex),
+            (socket, "gethostbyaddr", network.gethostbyaddr),
+            (socket, "getaddrinfo", network.resolve_addrinfo),
+            (socket, "getnameinfo", network.resolve_nameinfo),
             (socket, "socket", virtual_socket_class(network)),
             (select, "select", selector.select),
         ]

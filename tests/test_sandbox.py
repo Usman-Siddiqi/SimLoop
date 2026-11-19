@@ -139,7 +139,7 @@ def test_real_socket_is_a_leak_even_if_the_error_is_swallowed() -> None:
 
 def test_real_dns_is_a_leak() -> None:
     async def main() -> None:
-        socket.getaddrinfo("example.com", 443)
+        _socket.getaddrinfo("example.com", 443)
 
     _assert_leak(main, "socket.getaddrinfo")
 

@@ -6,6 +6,7 @@ import asyncio
 import socket
 import sys
 from collections.abc import Callable, Coroutine
+from socket import gethostname as gethostname_by_name
 from typing import Any
 
 import pytest
@@ -343,6 +344,49 @@ def test_getaddrinfo() -> None:
         return [infos[0][4], local[0][4], missing, await loop.getnameinfo(("10.0.0.2", 5432))]
 
     assert run_ok(main).value == [("10.0.0.2", 5432), ("127.0.0.1", 80), "gaierror", ("db", "5432")]
+
+
+def test_blocking_name_lookups_resolve_simulated_hosts() -> None:
+    async def main() -> list[object]:
+        net = simloop.network()
+        net.add_host("db")
+
+        async def on_db() -> list[object]:
+            return [socket.gethostname(), gethostname_by_name(), socket.getfqdn()]
+
+        names = await net.host("db").run(on_db())
+        try:
+            socket.gethostbyaddr("10.9.9.9")
+        except socket.herror:
+            unknown = "herror"
+        return [
+            socket.gethostname(),
+            socket.getfqdn(),
+            names,
+            socket.gethostbyname("db"),
+            socket.gethostbyname_ex("db"),
+            socket.gethostbyaddr("10.0.0.2"),
+            socket.getfqdn("10.0.0.2"),
+            socket.getfqdn("nowhere"),
+            unknown,
+            socket.getaddrinfo("db", "http")[0][4],
+            socket.getnameinfo(("10.0.0.2", 80), 0),
+        ]
+
+    assert run_ok(main).value == [
+        "main",
+        "main",
+        ["db", "db", "db"],
+        "10.0.0.2",
+        ("db", [], ["10.0.0.2"]),
+        ("db", [], ["10.0.0.2"]),
+        "db",
+        "nowhere",
+        "herror",
+        ("10.0.0.2", 80),
+        ("db", "80"),
+    ]
+    assert gethostname_by_name is socket.gethostname
 
 
 def test_udp_drops_duplicates_and_reorders() -> None:

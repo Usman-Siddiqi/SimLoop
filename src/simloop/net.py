@@ -468,16 +468,16 @@ class Network:
         for key in [k for k in self._used_ports if k[0] == host.name]:
             del self._used_ports[key]
 
-    async def getaddrinfo(
+    def resolve_addrinfo(
         self,
         host: bytes | str | None,
         port: bytes | str | int | None,
-        *,
         family: int = 0,
         type: int = 0,
         proto: int = 0,
         flags: int = 0,
     ) -> list[tuple[Any, ...]]:
+        """``socket.getaddrinfo`` against the simulated hosts."""
         name = host.decode() if isinstance(host, bytes) else host
         target = self.current_host() if name is None else self.resolve(name)
         if family not in (0, socket.AF_INET, socket.AF_UNSPEC):
@@ -496,9 +496,60 @@ class Network:
             for kind in kinds
         ]
 
-    async def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+    async def getaddrinfo(
+        self,
+        host: bytes | str | None,
+        port: bytes | str | int | None,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[Any, ...]]:
+        return self.resolve_addrinfo(host, port, family, type, proto, flags)
+
+    def resolve_nameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+        """``socket.getnameinfo`` against the simulated hosts."""
         host = self.resolve(str(sockaddr[0]))
         return host.name, str(sockaddr[1])
+
+    async def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
+        return self.resolve_nameinfo(sockaddr, flags)
+
+    # Code that names its own machine (``gethostname``, ``getfqdn``) gets the
+    # simulated host it runs on, so identities built from it are per host and
+    # the same on every machine that replays the seed.
+
+    def gethostname(self) -> str:
+        return self.current_host().name
+
+    def gethostbyname(self, name: str) -> str:
+        return self.resolve_addrinfo(name, None)[0][4][0]  # type: ignore[no-any-return]
+
+    def gethostbyname_ex(self, name: str) -> tuple[str, list[str], list[str]]:
+        return self._host_entry(name, socket.gaierror)
+
+    def gethostbyaddr(self, address: str) -> tuple[str, list[str], list[str]]:
+        return self._host_entry(address, socket.herror)
+
+    def getfqdn(self, name: str = "") -> str:
+        name = name.strip()
+        if not name or name in ("0.0.0.0", "::"):
+            return self.gethostname()
+        try:
+            return self._host_entry(name, socket.herror)[0]
+        except OSError:
+            return name
+
+    def _host_entry(self, name: str, error: type[OSError]) -> tuple[str, list[str], list[str]]:
+        if name in _LOOPBACK_NAMES:
+            return "localhost", [], ["127.0.0.1"]
+        host = self._hosts.get(name) or self._by_ip.get(name)
+        if host is None:
+            if error is socket.herror:
+                raise socket.herror(1, "Unknown host")
+            raise socket.gaierror(socket.EAI_NONAME, f"Name or service not known: {name!r}")
+        return host.name, [], [host.ip]
 
     def _register_fd(self, sock: Any) -> int:
         fd = next(self._fd_counter)
