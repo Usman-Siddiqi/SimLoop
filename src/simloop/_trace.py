@@ -8,8 +8,11 @@ Event text must be free of object ids, wall-clock time and hash ordering.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+
+_ADDRESS = re.compile(r"\b0x[0-9a-fA-F]{8,}\b")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,12 @@ class Trace:
     def record(self, step: int, time: float, kind: str, actor: str, detail: str = "") -> None:
         if not self.recording:
             return
+        # Libraries put object reprs into task names and messages; their
+        # addresses change from run to run and would break replay.
+        if "0x" in actor:
+            actor = _ADDRESS.sub("0x?", actor)
+        if "0x" in detail:
+            detail = _ADDRESS.sub("0x?", detail)
         event = TraceEvent(step, time, kind, actor, detail)
         self._hash.update(event.line().encode())
         self._hash.update(b"\n")

@@ -159,6 +159,26 @@ def test_task_sets_iterate_in_a_reproducible_order() -> None:
     assert len(cancelled) == 20
 
 
+class _Request:
+    pass
+
+
+async def _named_after_objects() -> None:
+    # Libraries name tasks and log messages after object reprs (aiocoap:
+    # "Request processing of <...Request object at 0x7f...>").
+    request = _Request()
+    task = asyncio.create_task(asyncio.sleep(0.1), name=f"processing {request!r}")
+    simloop.log(f"started {request!r}")
+    await task
+
+
+def test_object_addresses_do_not_reach_the_trace() -> None:
+    assert simloop.check_determinism(_named_after_objects, seed=0, runs=3) is None
+    trace = simloop.run(_named_after_objects, seed=0).trace
+    assert any("object at 0x?" in event.actor for event in trace)
+    assert any("object at 0x?" in event.detail for event in trace)
+
+
 _leaked_state = {"runs": 0}
 
 
