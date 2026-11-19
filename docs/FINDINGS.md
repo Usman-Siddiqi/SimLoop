@@ -1387,6 +1387,58 @@ here. Rules (see `CLAUDE.md`):
   loop and reconnect: nothing matching (#458 and #461 are other client
   races). Not reported.
 
+### 31. asyncssh 2.24.1: an SSH connection that closes while the server opens a port forward leaks the forwarded connection
+
+- **Library:** [asyncssh](https://pypi.org/project/asyncssh/) 2.24.1
+  (latest release; the `develop` branch has the same code), server side of
+  `direct-tcpip` forwarding (what `forward_local_port` and
+  `open_connection` on a client ask for).
+- **Reproduction:** [`findings/asyncssh_forward_leak.py`](../findings/asyncssh_forward_leak.py)
+  (the SimLoop harness, a patched `_finish_open_request` as the control,
+  and a plain-asyncio reproduction).
+- **Seeds:** the client forwards a local port through the server to an
+  echo host and four tasks push up to 120 KB each through it. Seeds 0-29,
+  default scheduler / `scheduler="fifo", timer_jitter=0.001`,
+  `strict_cancellation=True`. Without faults and with `wait_for`
+  cancellations, all pass. With 0.2% TCP resets per segment on the SSH
+  link: 8 / 12 fail (first seed 2 / 0), e.g. seed 2: `1 forwarded
+  connection(s) to the target still open although the server has no SSH
+  connection`. With the control, all 60 pass. The same script's session
+  workloads (16 exec channels multiplexed on one connection, windows down
+  to 2 KB, packets down to 1 KB, with cancellations, resets, or partitions
+  under keepalives) all pass: data intact, every server handler ended, no
+  channel left.
+- **Property violated:** when an SSH connection goes away, the server
+  closes every connection it opened on that connection's behalf.
+- **Explanation:** for a `direct-tcpip` request the server's session is
+  the coroutine `forward_connection()`, which connects to the target and
+  returns an `SSHForwarder` holding that TCP connection.
+  `SSHChannel._finish_open_request` awaits it and then checks whether the
+  SSH connection still exists; if it closed during the connect, it raises
+  `ChannelOpenError` and schedules the channel's `_cleanup`. But the
+  session was never attached to the channel (`self._session` is set only
+  after that check), so `_cleanup` does not call its `connection_lost`,
+  and nothing else references it: the connection to the target stays open
+  until the target closes it. Closing the session there (calling its
+  `connection_lost`) fixes it. Issue #823 (closed) fixed a mirror image on
+  the client side: a local TCP client that disconnects while the channel
+  open is in flight.
+
+  On plain asyncio: 20 clients each call `open_connection` to a local
+  target and close the SSH connection right away. Afterwards the server
+  has no SSH connection, and all 20 connections it opened to the target
+  are still open.
+- **Impact:** medium for servers built on asyncssh (jump hosts,
+  tunnelling services): every client that disconnects, or whose
+  connection drops, while a forward is being set up leaves one outbound
+  connection (and file descriptor) behind for as long as the target keeps
+  it, which for an idle database or service is forever. A misbehaving
+  client can do this on purpose.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** searched issues and pull requests for forwarding
+  leaks, `_finish_open_request` and connections left open: only #823 (the
+  client-side variant, closed) and #127 (unrelated). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

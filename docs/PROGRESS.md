@@ -163,6 +163,15 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   is read kills the client's read loop without a disconnect, so it stays
   "connected", never reconnects and every call times out (confirmed on
   plain asyncio, not reported).
+- asyncssh 2.24.1: exec sessions clean (multiplexed channels, tiny
+  windows, cancellations, resets, partitions with keepalives); a
+  connection that closes while the server connects a `direct-tcpip`
+  forward leaks the forwarded connection (confirmed on plain asyncio, not
+  reported). Needed two framework changes: `socket.gethostname`/`getfqdn`
+  and the blocking resolver functions now answer from the simulated
+  network (asyncssh calls `getfqdn` while building options), and stream
+  transports duck-type protocols as asyncio does (its forwarders are not
+  `asyncio.Protocol` subclasses).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
@@ -183,7 +192,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 251 tests.
+- 254 tests.
 
 ### In progress
 - Nothing half-done.
