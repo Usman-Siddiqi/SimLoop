@@ -452,10 +452,11 @@ ordering in the code under test is reproducible across invocations. Exit code
   `SystemRandom`). Third-party modules that imported these functions by
   name (`from time import monotonic`, as psycopg_pool does) get their module
   globals swapped for the run too. Local time (`time.localtime`, `mktime`,
-  `strftime`, `datetime.now()`, `fromtimestamp()`) is a simulated fixed zone,
-  UTC unless `SimConfig(utc_offset=...)` says otherwise, so a run never
-  depends on the machine's `TZ`, and an offset such as `-5` exposes code that
-  mixes local and UTC times. A blocking `time.sleep` stalls the whole simulated loop,
+  `strftime`, `datetime.now()`, `fromtimestamp()`) is a simulated zone, UTC
+  unless `SimConfig(timezone=...)` says otherwise (an offset in hours such as
+  `-5`, or an IANA name such as `"America/New_York"`, which brings its
+  daylight-saving transitions), so a run never depends on the machine's
+  `TZ`, and another zone exposes code that mixes local and UTC times. A blocking `time.sleep` stalls the whole simulated loop,
   just as it would stall a real one. A PEP 578 audit hook rejects real
   sockets, DNS lookups, threads and subprocesses and records the leak, so the
   run fails even if the code swallows the exception.
@@ -499,11 +500,10 @@ These are current, known gaps rather than design limits unless stated.
 - **`datetime.now()`, `utcnow()` and `date.today()` are simulated** by
   swapping stand-in classes into `datetime` and into modules that imported
   the classes by name. A class reference stored anywhere else (a dict, a
-  default argument) keeps the real clock. The simulated zone has a fixed
-  offset (no daylight-saving transitions). `TZ` is set to it for the run
-  (`Etc/GMT+5` for `utc_offset=-5`), which is what `tzlocal` and naive
-  `astimezone()` read; those need the system's zone database for offsets
-  other than 0.
+  default argument) keeps the real clock. `TZ` is set to the simulated zone
+  for the run (`Etc/GMT+5` for `timezone=-5`), which is what `tzlocal` and
+  naive `astimezone()` read; named zones, and those two for offsets other
+  than 0, need the system's zone database (or the `tzdata` package).
 - `run_in_executor` and `to_thread` run the function inline (with blocking
   sleeps counted as its duration) instead of on a thread. Code that blocks a
   worker thread waiting for the event loop will deadlock.

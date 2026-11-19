@@ -590,11 +590,11 @@ here. Rules (see `CLAUDE.md`):
 - **Library:** [aiobreaker](https://pypi.org/project/aiobreaker/) 1.2.0
   (latest release, 2021; the same code is on the upstream default branch).
 - **Reproduction:** [`findings/circuit_breakers.py`](../findings/circuit_breakers.py),
-  run with `SimConfig(utc_offset=...)`.
+  run with `SimConfig(timezone=...)`.
 - **Seeds:** the harness of #14 passes on all 100 seeds with
-  `utc_offset=0` and fails on all 100 with `utc_offset=-5` ("reported a
+  `timezone=0` and fails on all 100 with `timezone=-5` ("reported a
   time to reopen of 18000.99885 s (recovery timeout 1 s)") and with
-  `utc_offset=1` (`TypeError: unsupported operand type(s) for -:
+  `timezone=1` (`TypeError: unsupported operand type(s) for -:
   'NoneType' and 'datetime.datetime'`), on the first rejection.
 - **Property violated:** a rejection reports when the breaker will try
   again (`CircuitBreakerError.reopen_time`, `time_remaining`,

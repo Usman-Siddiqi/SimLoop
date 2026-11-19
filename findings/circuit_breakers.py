@@ -12,7 +12,7 @@ counts as neither failure nor success) and checks that:
 * the exception raised for a rejection has a short traceback;
 * once the backend works again, calls succeed within a few recovery timeouts.
 
-Each library runs in three simulated time zones (``SimConfig.utc_offset``).
+Each library runs in three simulated time zones (``SimConfig.timezone``).
 
 Findings:
 
@@ -260,9 +260,9 @@ async def plain_cancelled_trial(module: Any) -> list[str]:
 def main() -> int:
     for library, expected_by_zone in EXPECTED.items():
         for zone in ZONES:
-            config = simloop.SimConfig(utc_offset=zone)
+            config = simloop.SimConfig(timezone=zone)
             report = simloop.explore(make_harness(library), seeds=range(100), config=config)
-            print(f"{library}, utc_offset={zone:+d}: {report.summary()}")
+            print(f"{library}, timezone={zone:+d}: {report.summary()}")
             found = classify(report)
             expected = expected_by_zone.get(zone, expected_by_zone[0])
             assert found == expected, (library, zone, found)

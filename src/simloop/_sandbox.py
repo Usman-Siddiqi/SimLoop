@@ -6,7 +6,7 @@ Two mechanisms:
   simulated time, the ``random`` module's global generator is reseeded from
   the run seed, ``datetime.now()`` and ``date.today()`` read the simulated
   wall clock (see :mod:`simloop._vdatetime`), local time is a fixed simulated
-  zone (``SimConfig.utc_offset``, UTC by default) instead of the host's, and
+  zone (``SimConfig.timezone``, UTC by default) instead of the host's, and
   ``os.urandom`` (and with it ``uuid4``, ``secrets`` and ``SystemRandom``)
   returns seeded bytes.
   Everything is restored on exit. Third-party modules that imported these
@@ -20,7 +20,6 @@ Two mechanisms:
 
 from __future__ import annotations
 
-import calendar
 import os
 import random
 import select
@@ -133,12 +132,12 @@ class Sandbox:
     """Context manager that confines the current thread to the simulation."""
 
     def __init__(
-        self, loop: SimEventLoop, seed: int, epoch: float, utc_offset: float = 0.0
+        self, loop: SimEventLoop, seed: int, epoch: float, timezone: str | float = "UTC"
     ) -> None:
         self.loop = loop
         self.seed = seed
         self.epoch = epoch
-        self.zone = _vdatetime.fixed_zone(utc_offset)
+        self.zone = _vdatetime.Zone(timezone)
         self.leaks: list[str] = []
         self.leak_errors: list[NondeterminismError] = []
         self.suspended = False
@@ -214,18 +213,20 @@ class Sandbox:
         original_strftime = time.strftime
         # Local time is the simulated zone, never the host's: a run must not
         # depend on the TZ of the machine it happens to execute on.
-        offset = round(self.zone.utcoffset(None).total_seconds())
-        zone_name = self.zone.tzname(None)
+        zone = self.zone
 
         def localtime(secs: float | None = None) -> time.struct_time:
-            shifted = original_gmtime((wall() if secs is None else secs) + offset)
-            return time.struct_time((*shifted[:8], 0), {"tm_zone": zone_name, "tm_gmtoff": offset})
+            moment = zone.local(wall() if secs is None else secs)
+            offset = round(moment.utcoffset().total_seconds())
+            fields = (*moment.timetuple()[:8], 1 if moment.dst() else 0)
+            return time.struct_time(fields, {"tm_zone": moment.tzname(), "tm_gmtoff": offset})
 
         def gmtime(secs: float | None = None) -> time.struct_time:
             return original_gmtime(wall() if secs is None else secs)
 
         def mktime(t: Any) -> float:
-            return float(calendar.timegm(tuple(t)[:6]) - offset)
+            fields = tuple(t)
+            return float(round(zone.timestamp(fields, fields[8])))
 
         def asctime(t: Any = None) -> str:
             return original_asctime(localtime() if t is None else t)
@@ -235,6 +236,8 @@ class Sandbox:
 
         def strftime(fmt: str, t: Any = None) -> str:
             return original_strftime(fmt, localtime() if t is None else t)
+
+        west, west_dst, daylight, tzname = zone.constants(original_gmtime(wall()).tm_year)
 
         def ns(func: Callable[[], float]) -> Callable[[], int]:
             return lambda: round(func() * 1_000_000_000)
@@ -257,10 +260,10 @@ class Sandbox:
             (time, "asctime", asctime),
             (time, "ctime", ctime),
             (time, "strftime", strftime),
-            (time, "timezone", -offset),
-            (time, "altzone", -offset),
-            (time, "daylight", 0),
-            (time, "tzname", (zone_name, zone_name)),
+            (time, "timezone", west),
+            (time, "altzone", west_dst),
+            (time, "daylight", daylight),
+            (time, "tzname", tzname),
             (os, "urandom", self._urandom),
             (random, "_urandom", self._urandom),
             (random, "seed", self._random_seed),
@@ -313,7 +316,7 @@ class Sandbox:
         # simulated zone too, before the time module's zone constants are
         # patched (tzset rewrites them).
         self._saved_tz = os.environ.get("TZ")
-        os.environ["TZ"] = _vdatetime.tz_variable(self.zone)
+        os.environ["TZ"] = self.zone.tz_variable
         _tzset()
         inst: random.Random = random._inst
         self._random_state = inst.getstate()
@@ -325,7 +328,7 @@ class Sandbox:
                 self._replacements[id(original)] = replacement
             setattr(owner, name, replacement)
         self._install_captured()
-        self._datetime_undo = _vdatetime.install(self._wall, self.zone)
+        self._datetime_undo = _vdatetime.install(self._wall, self.zone.tzinfo)
         # A simulated network has no proxy; proxy settings inherited from the
         # real environment would send simulated traffic to an address that does
         # not exist (and make runs machine-dependent).

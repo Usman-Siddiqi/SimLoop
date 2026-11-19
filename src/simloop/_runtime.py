@@ -63,12 +63,14 @@ class SimConfig:
     between iterations, which code that spins until time passes relies on."""
     start_time: float = 0.0
     epoch: float = DEFAULT_EPOCH
-    utc_offset: float = 0.0
-    """The simulated local time zone, as a fixed offset from UTC in hours.
-    ``time.localtime``, ``mktime``, ``strftime``, ``datetime.now()``,
-    ``fromtimestamp()`` and ``date.today()`` use it instead of the host's
-    zone, so runs do not depend on the machine's TZ; a non-zero offset
-    exposes code that mixes local and UTC times."""
+    timezone: str | float = "UTC"
+    """The simulated local time zone: an offset from UTC in hours (``-5``,
+    ``5.5``) or an IANA name (``"America/New_York"``, with its
+    daylight-saving transitions). ``time.localtime``, ``mktime``,
+    ``strftime``, ``datetime.now()``, ``fromtimestamp()``, ``date.today()``,
+    ``TZ`` and tzlocal use it instead of the host's zone, so runs do not
+    depend on the machine's TZ; another zone exposes code that mixes local
+    and UTC times."""
     sandbox: bool = True
     """Virtualize time/randomness and reject real I/O while the run is active."""
     fail_on_unhandled: bool = True
@@ -290,7 +292,7 @@ class Simulation:
             gc.collect(1)
             gc.disable()
         sandbox = (
-            Sandbox(self.loop, self.seed, self.config.epoch, self.config.utc_offset)
+            Sandbox(self.loop, self.seed, self.config.epoch, self.config.timezone)
             if self.config.sandbox
             else None
         )

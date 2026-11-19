@@ -54,7 +54,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   raises a bare `AssertionError` (both confirmed on real asyncio, not
   reported). The harness also rediscovers #1085 (PING written ahead of
   queued commands). Request/reply and per-publisher ordering held.
-- **Simulated time zone**: `SimConfig(utc_offset=hours)`. Local-time
+- **Simulated time zone**: `SimConfig(timezone=-5 or "America/New_York")`. Local-time
   functions (`time.localtime`, `mktime`, `strftime`, `ctime`, `asctime`, the
   `time.timezone` constants, `datetime.now()`, `fromtimestamp()`,
   `date.today()`) use a fixed simulated zone, UTC by default, so runs no
