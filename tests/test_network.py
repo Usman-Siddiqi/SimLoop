@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -12,6 +13,11 @@ import pytest
 import simloop
 
 from .helpers import run_ok
+
+try:
+    from fcntl import fcntl as fcntl_by_name
+except ImportError:  # Windows
+    fcntl_by_name = None  # type: ignore[assignment]
 
 
 async def echo_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -480,6 +486,33 @@ def test_virtual_sockets_for_libraries_that_bring_their_own() -> None:
         return [type(listener).__name__, reply, blocking]
 
     assert run_ok(main).value == ["socket", b"echo via sock\n", "blocking I/O rejected"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_fcntl_flags_on_a_virtual_socket_stay_in_the_simulation() -> None:
+    import fcntl
+    import os
+
+    async def main() -> list[object]:
+        sock = socket.socket()
+        seen: list[object] = [fcntl.fcntl(sock.fileno(), fcntl.F_GETFD) & fcntl.FD_CLOEXEC]
+        assert fcntl_by_name is not None
+        fcntl_by_name(sock, fcntl.F_SETFD, 0)  # imported by name, as pymongo does
+        seen.append(fcntl.fcntl(sock, fcntl.F_GETFD))
+        flags = fcntl.fcntl(sock, fcntl.F_GETFL)
+        fcntl.fcntl(sock, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        seen.append(sock.gettimeout())
+        with pytest.raises(simloop.UnsupportedOperation):
+            fcntl.fcntl(sock, fcntl.F_GETLK)
+        read_end, write_end = os.pipe()
+        try:
+            seen.append(fcntl.fcntl(read_end, fcntl.F_GETFD) == fcntl.FD_CLOEXEC)
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+        return seen
+
+    assert run_ok(main).value == [fcntl.FD_CLOEXEC, 0, 0.0, True]
 
 
 def test_reset_is_reported_after_callbacks_scheduled_by_earlier_data() -> None:

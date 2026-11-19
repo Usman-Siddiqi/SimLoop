@@ -38,8 +38,13 @@ from . import _vdatetime
 from ._choices import derive_seed
 from ._loop import SimEventLoop
 from ._transport import virtual_socket_class
-from ._vselect import VirtualSelect
+from ._vselect import VirtualSelect, virtual_fcntl
 from .errors import NondeterminismError
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows
+    _fcntl = None  # type: ignore[assignment]
 
 _BLOCKED_EVENTS = frozenset(
     {
@@ -76,6 +81,7 @@ _CAPTURABLE: dict[int, object] = {
         time.perf_counter_ns,
         time.sleep,
         os.urandom,
+        *([_fcntl.fcntl] if _fcntl is not None else []),
     )
 }
 # Standard-library modules keep the real functions: threading, queue and the
@@ -275,10 +281,13 @@ class Sandbox:
 
     def _socket_patches(self) -> list[tuple[object, str, object]]:
         network = self.loop.network
+        patches: list[tuple[object, str, object]] = []
+        if _fcntl is not None:
+            patches.append((_fcntl, "fcntl", virtual_fcntl(network, _fcntl.fcntl)))
         if network is None:
-            return []
+            return patches
         selector = VirtualSelect(network)
-        patches: list[tuple[object, str, object]] = [
+        patches += [
             (socket, "socket", virtual_socket_class(network)),
             (select, "select", selector.select),
         ]

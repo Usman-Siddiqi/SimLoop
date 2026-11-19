@@ -1,4 +1,4 @@
-"""``select.select`` and ``select.poll`` for simulated sockets.
+"""``select.select``, ``select.poll`` and ``fcntl.fcntl`` for simulated sockets.
 
 Some libraries check an idle pooled connection with a zero-timeout poll to
 see whether the server closed it. Inside a simulation the descriptors are
@@ -6,12 +6,17 @@ virtual, so the sandbox swaps these functions for versions that read the
 simulated connection state. Waiting (a non-zero timeout with nothing ready)
 would block the whole simulated loop, and real descriptors would bring in the
 real OS, so both raise.
+
+Others set close-on-exec or non-blocking mode with ``fcntl`` on a socket they
+just created. On a virtual descriptor those flags are kept on the simulated
+socket; ``fcntl`` on a real descriptor is a local call and goes to the OS.
 """
 
 from __future__ import annotations
 
+import os
 import select
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .errors import UnsupportedOperation
@@ -95,3 +100,27 @@ class VirtualPoll:
         wait = None if timeout is None or timeout < 0 else timeout
         self._owner._check_wait(wait, bool(events))
         return events
+
+
+def virtual_fcntl(network: Network | None, original: Callable[..., Any]) -> Callable[..., Any]:
+    import fcntl
+
+    def fcntl_(fd: Any, cmd: int, arg: Any = 0) -> Any:
+        sock = network.socket_for_fd(_fd(fd)) if network is not None else None
+        if sock is None:
+            return original(fd, cmd, arg)
+        if cmd == fcntl.F_GETFD:
+            return getattr(sock, "_fd_flags", fcntl.FD_CLOEXEC)
+        if cmd == fcntl.F_SETFD:
+            sock._fd_flags = int(arg) & fcntl.FD_CLOEXEC
+            return 0
+        blocking = getattr(sock, "gettimeout", lambda: None)() != 0.0
+        if cmd == fcntl.F_GETFL:
+            return os.O_RDWR | (0 if blocking else os.O_NONBLOCK)
+        if cmd == fcntl.F_SETFL:
+            if hasattr(sock, "setblocking"):
+                sock.setblocking(not int(arg) & os.O_NONBLOCK)
+            return 0
+        raise UnsupportedOperation(f"fcntl command {cmd} on a simulated socket is not simulated")
+
+    return fcntl_
