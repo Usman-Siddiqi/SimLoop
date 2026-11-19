@@ -172,6 +172,15 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   network (asyncssh calls `getfqdn` while building options), and stream
   transports duck-type protocols as asyncio does (its forwarders are not
   `asyncio.Protocol` subclasses).
+- aioquic 1.8.0 over simulated UDP: loss recovery and flow control clean
+  at 5-10% loss with duplicates and cancellations; `create_stream()` hands
+  the same id to two callers that both yield before writing (rediscovers
+  upstream PR #835, merged after the release). Framework changes on the
+  way: datetime is now simulated by swapping the real classes' clock
+  methods in place (the stand-in class broke `cryptography`, through
+  PyO3's cached type checks, for the rest of the process), dual-stack
+  IPv6 UDP sockets see IPv4-mapped addresses, and
+  `create_datagram_endpoint` returns after `connection_made`.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
@@ -192,7 +201,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 254 tests.
+- 257 tests.
 
 ### In progress
 - Nothing half-done.

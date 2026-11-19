@@ -1439,6 +1439,53 @@ here. Rules (see `CLAUDE.md`):
   leaks, `_finish_open_request` and connections left open: only #823 (the
   client-side variant, closed) and #127 (unrelated). Not reported.
 
+### 32. aioquic 1.8.0: two tasks that create a stream before either writes get the same stream (known upstream, fixed after the release)
+
+- **Library:** [aioquic](https://pypi.org/project/aioquic/) 1.8.0 (latest
+  release), asyncio API (`QuicConnectionProtocol.create_stream`).
+- **Reproduction:** [`findings/aioquic_streams.py`](../findings/aioquic_streams.py)
+  (the SimLoop harness, a `create_stream` that reserves the id as the
+  control, and a plain-asyncio reproduction).
+- **Seeds:** an echo server and a client over simulated UDP (1-20 ms
+  latency); four tasks open four streams each and push up to 150 KB
+  through them. Seeds 0-19, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`, `strict_cancellation=True`, `step_time=1e-6`. When
+  each stream's first byte is written as soon as it is created, every
+  check held with no faults, with 5% loss and 5% duplication, and with
+  10% loss, duplication and `wait_for` cancellations (loss recovery and
+  flow control intact). When the tasks yield between `create_stream()`
+  and their first write: 20 / 20 fail (first seed 0 / 0), with
+  `StreamStateError: Cannot send data after FIN`, mixed replies, or a
+  reader that never finishes. With the control, all 40 pass.
+- **Property violated:** each `create_stream()` returns a new stream.
+- **Explanation:** `create_stream()` returns
+  `get_next_available_stream_id()`, which only advances when data is
+  first sent on that stream. Any task that creates a stream and yields
+  before writing (for example to `gather` its reader and writer) lets the
+  next `create_stream()` return the same id, so two callers share one
+  QUIC stream.
+
+  On plain asyncio: two tasks that each call `create_stream()` and then
+  `await asyncio.sleep(0)` get stream ids `[0, 0]` (with the control,
+  `[0, 4]`).
+- **Impact:** medium: concurrent request code on one connection
+  corrupts its streams.
+- **Feasibility:** deterministic on plain asyncio (the script above).
+- **Upstream status:** fixed by aiortc/aioquic#835 ("Fix the lifecycle of
+  asyncio QUIC streams", merged 2026-11-15, after 1.8.0), which says
+  `create_stream()` "also reserves the stream ID, so that two calls before
+  the first write no longer return the same stream". The same PR fixes
+  what the harness saw when an idle timeout closed the connection during
+  a partition: streams end with a clean EOF, and `create_stream()` keeps
+  returning streams that never end. Rediscovered from a generic "each
+  stream gets its own bytes back" check. Not reported.
+- **Harness note:** aioquic re-queues the streams it served from a `set`
+  of stream objects, which iterates in memory-address order, so runs with
+  loss differed between replays; the script hashes streams by id (the
+  order is arbitrary either way). The test certificate uses Ed25519,
+  whose signatures have a fixed length; ECDSA signature lengths vary with
+  OpenSSL's randomness, which SimLoop does not control.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

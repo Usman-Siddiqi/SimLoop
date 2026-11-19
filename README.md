@@ -499,9 +499,10 @@ These are current, known gaps rather than design limits unless stated.
   whose `threading` and `queue` time real threads. `explore` catches the
   resulting non-determinism after the fact, but cannot prevent it.
 - **`datetime.now()`, `utcnow()` and `date.today()` are simulated** by
-  swapping stand-in classes into `datetime` and into modules that imported
-  the classes by name. A class reference stored anywhere else (a dict, a
-  default argument) keeps the real clock. `TZ` is set to the simulated zone
+  swapping the clock methods of the real `datetime` and `date` classes for
+  the run, so every reference to the classes (and subclasses) sees
+  simulated time and the classes themselves never change; C code that
+  reads the OS clock directly keeps the real one. `TZ` is set to the simulated zone
   for the run (`Etc/GMT+5` for `timezone=-5`), which is what `tzlocal` and
   naive `astimezone()` read; named zones, and those two for offsets other
   than 0, need the system's zone database (or the `tzdata` package).
@@ -564,6 +565,7 @@ against the pinned versions.
 | [grpclib](https://pypi.org/project/grpclib/) | 0.4.9 | A call that runs past its `timeout=` cancels the caller's task and raises `TimeoutError` without `uncancel()`, so the task keeps a cancel request: on Python 3.13+ its next `TaskGroup` whose child fails leaves it to be cancelled at the following `await` ([script](findings/grpclib_deadline_cancel.py)) | No upstream issue found; not reported |
 | [python-engineio](https://pypi.org/project/python-engineio/) (python-socketio client) | 4.15.1 | With the polling transport, a connection reset while a poll response body is read kills the read loop without a disconnect: the client keeps reporting `connected`, never reconnects, and every call times out ([script](findings/engineio_polling_zombie.py)) | No upstream issue found; not reported |
 | [asyncssh](https://pypi.org/project/asyncssh/) | 2.24.1 | When an SSH connection closes while the server is still connecting a port forward to its target, the server never closes that forwarded connection, so each such disconnect leaks an outbound connection ([script](findings/asyncssh_forward_leak.py)) | No upstream issue found (#823 fixed the client-side variant); not reported |
+| [aioquic](https://pypi.org/project/aioquic/) | 1.8.0 | Two tasks that call `create_stream()` before either writes get the same stream id, so their data mixes on one QUIC stream ([script](findings/aioquic_streams.py)) | Known: fixed by PR #835 after the 1.8.0 release; rediscovered, not reported |
 
 Each comes with a property the library promises (at most N jobs at once;
 one execution per key; one task inside a lock; balanced cancel requests;
