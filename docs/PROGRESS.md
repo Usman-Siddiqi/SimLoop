@@ -12,6 +12,13 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   future a library cancels to wake its own task (aiohttp) is still accepted.
   Every existing harness was re-swept with the check on, random and fifo:
   no new hits besides the recorded bugs.
+- **Captured clocks**: third-party modules that imported `time` or
+  `os.urandom` functions by name (`from time import monotonic`) get those
+  module globals swapped for the run and restored after; a module first
+  imported inside a run is pointed back at the real functions on exit. The
+  standard library keeps the real functions (`threading` and `queue` time
+  real threads). Found through psycopg_pool, whose timers read the real
+  clock and made 23 of 300 seeds fail without replaying.
 - **Findings**: singleflight 0.1.3 `SingleFlightAsync`: a cancelled leader
   hands concurrent callers `None` and leaves the key returning `None` for
   good (confirmed, not reported). aiodataloader 0.4.3: one caller's
@@ -31,7 +38,10 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   redis-py reply-integrity harness against valkey-py 6.2.0 was clean (500
   seeds, random and fifo, with `strict_cancellation`); not kept as a
   harness.
-- 232 tests.
+- Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
+  connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
+  `Semaphore` and `Queue`.
+- 235 tests.
 
 ### In progress
 - Nothing half-done.

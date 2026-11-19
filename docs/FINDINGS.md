@@ -608,3 +608,22 @@ properties and fault mixes only.
 - **aiorwlock 1.6.0**, [`findings/aiorwlock_exclusion.py`](../findings/aiorwlock_exclusion.py): mutual exclusion (no writer with readers or another
   writer), no deadlock and no lock left held, across 3000 seeds with random
   acquire timeouts, in both `fast` modes.
+- **psycopg-pool 3.3.3 (`AsyncConnectionPool`)**, [`findings/psycopg_pool_clients.py`](../findings/psycopg_pool_clients.py),
+  against a stand-in connection class (connects in 0-20 ms, fails 5% of the
+  time), `max_size` 1-3, five clients with random `wait_for` timeouts: no
+  connection went to two clients at once, no more than `max_size` stayed
+  open, and the pool could hand out `max_size` connections afterwards. 1000
+  seeds each with `random`, `pct` and `fifo` plus 1 ms jitter, with
+  `strict_cancellation=True`. An earlier run failed on 23 of 300 seeds and
+  did not replay: psycopg_pool imports `monotonic` by name, which kept the
+  real clock. SimLoop now swaps such module globals for the run.
+- **aio-pika 10.2.3 (`aio_pika.pool.Pool`)**, [`findings/aio_pika_pool.py`](../findings/aio_pika_pool.py):
+  no item held by two users, never more than `max_size` items created,
+  every user finished, with a constructor that fails 10% of the time and
+  random `wait_for` timeouts. 1000 seeds each with `random`, `pct` and
+  `fifo` plus 1 ms jitter, with `strict_cancellation=True`.
+- **aiologic 0.17.1**, [`findings/aiologic_primitives.py`](../findings/aiologic_primitives.py):
+  `Lock` mutual exclusion, the `Semaphore` bound and permit return, and
+  exactly-once delivery through bounded and unbounded `Queue`s, with random
+  `wait_for` timeouts on every side. 1000 seeds per primitive each with
+  `random`, `pct` and `fifo` plus 1 ms jitter, with `strict_cancellation=True`.

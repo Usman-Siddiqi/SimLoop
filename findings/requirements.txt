@@ -27,3 +27,7 @@ aiodataloader==0.4.3
 strawberry-graphql==0.341.2
 aiomcache==0.8.2
 coredis==6.9.0
+psycopg[binary]==3.3.9
+psycopg-pool==3.3.3
+aio-pika==10.2.3
+aiologic==0.17.1
