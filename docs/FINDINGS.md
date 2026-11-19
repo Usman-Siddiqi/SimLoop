@@ -875,3 +875,13 @@ properties and fault mixes only.
   exactly-once delivery through bounded and unbounded `Queue`s, with random
   `wait_for` timeouts on every side. 1000 seeds per primitive each with
   `random`, `pct` and `fifo` plus 1 ms jitter, with `strict_cancellation=True`.
+- **aiocron 2.1 and APScheduler 3.11.3 (`AsyncIOScheduler`)**, [`findings/cron_dst.py`](../findings/cron_dst.py),
+  in a simulated `America/New_York` zone (`SimConfig(timezone=...)`) over
+  the spring-forward and fall-back nights of 2024, `fifo` with 10 ms timer
+  jitter: a `*/15` job fired every 15 minutes of real time at second 0
+  through the gap and the repeated hour, and daily jobs at 01:30 and 02:30
+  fired once per night. The one exception is documented: APScheduler runs
+  a daily 01:30 job twice on the night the clocks go back (its cron docs
+  say so; #1199 discusses the wording). APScheduler's DST handling has many
+  recent upstream issues and PRs (#1144, #1183, #1198, #1200); this
+  harness did not reach those cases.

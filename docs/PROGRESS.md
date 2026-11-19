@@ -60,6 +60,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   `date.today()`) use a fixed simulated zone, UTC by default, so runs no
   longer depend on the host's `TZ` (before, `datetime.now()` converted with
   the host zone). A non-zero offset found the aiobreaker bug below.
+- The simulated zone can also be an IANA name (`timezone="America/New_York"`),
+  with its daylight-saving transitions; `TZ` and tzlocal follow it during a
+  run. Clean harness: aiocron and APScheduler cron jobs across both 2024
+  transitions (APScheduler's documented double run in the repeated hour
+  aside).
 - Circuit breakers, one model-based harness for four libraries:
   circuitbreaker 2.1.3 and aiocircuitbreaker 2.0.0 count a cancelled call as
   a success (a timed-out half-open trial closes the circuit); aiobreaker
@@ -73,7 +78,7 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.
-- 242 tests.
+- 247 tests.
 
 ### In progress
 - Nothing half-done.
