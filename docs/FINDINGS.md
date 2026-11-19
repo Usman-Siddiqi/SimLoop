@@ -397,6 +397,74 @@ here. Rules (see `CLAUDE.md`):
   the default branch still has the bug. Nothing found for the lost wakeup.
   Not reported.
 
+### 12. asyncpg 0.32.0: a connection lost during `release` raises `InternalClientError`
+
+- **Library:** [asyncpg](https://pypi.org/project/asyncpg/) 0.32.0 (latest
+  release on 2026-11-19; `pool.py` is unchanged on the upstream default
+  branch), `Pool` with `pool.fetchval` and `async with pool.acquire()`.
+- **Reproduction:** [`findings/asyncpg_pool.py`](../findings/asyncpg_pool.py)
+  (two plain-asyncio reproductions against a local server, plus the SimLoop
+  harness). The server is [`findings/_pg.py`](../findings/_pg.py), a small
+  PostgreSQL wire-protocol simulator that asyncpg drives unmodified: startup,
+  prepared `SELECT $1::text` that echoes its parameter after a random delay,
+  the pool's reset query, and `CancelRequest`.
+- **Seeds:** 4 workers, 10 operations each, half `pool.fetchval` and half a
+  two-query `async with pool.acquire()` block, 30% under a random
+  `wait_for` timeout (asyncpg answers each with a `CancelRequest`),
+  `max_size` 1-3, 1% TCP resets and random server crashes, then a recovery
+  check; `strict_cancellation=True`. Of seeds 0-499: default scheduler 2
+  failures (seeds 55 and 397, both the cosmetic log below); pct 0; `scheduler="fifo",
+  timer_jitter=0.001` 4 failures (seed 440 the `InternalClientError`;
+  seeds 61, 81 and 253 the log). Reply integrity held on every seed (each
+  query got its own parameter back), and the pool recovered after the
+  faults on every seed.
+- **Property violated:** releasing a connection whose socket has died
+  either succeeds or raises one of asyncpg's documented connection errors.
+- **Explanation:** `Pool.release` checks that the proxy is still attached
+  (`connection._con is not None`) and then awaits
+  `asyncio.shield(holder.release(timeout))`, which runs the holder's
+  `release` in a new task. If the socket fails in between (a reset seen by
+  the transport, or the server going away), asyncio has already queued the
+  protocol's `connection_lost`, which runs before the shielded task starts:
+  `Connection._cleanup` calls `holder._release_on_close()`, which marks the
+  holder free (`_in_use = None`) and returns it to the pool. The task then
+  hits the first check in `PoolConnectionHolder.release` and raises
+  `InternalClientError: PoolConnectionHolder.release() called on a free
+  connection holder`. The very next check in that method handles a closed
+  connection gracefully (`if self._con.is_closed(): terminate(); return`),
+  so the abort path is anticipated but the order of the two checks lets
+  this one through. `InternalClientError` is documented as an asyncpg bug
+  class; it subclasses neither `PostgresError` nor `InterfaceError`, so the
+  usual `except` clauses for a dropped connection miss it and it reaches
+  the application from the `async with` exit. The pool itself stays
+  consistent: the holder was already returned and the next acquire works.
+
+  A second, cosmetic effect: when the caller is cancelled while `release`
+  runs the reset query and that query then fails because the connection
+  dropped, nothing retrieves the shielded task's exception, and asyncio
+  logs "Task exception was never retrieved" with
+  `ConnectionDoesNotExistError`.
+
+  On plain asyncio: aborting the transport inside `async with
+  pool.acquire()` (exactly what asyncio's selector transport does on a
+  socket error: it schedules `connection_lost` for the next iteration)
+  makes the block's exit raise the `InternalClientError`, and the next
+  `pool.fetchval` succeeds. With a server that stalls the reset query and
+  then drops the connection, `wait_for(block, 0.02)` timing out during the
+  release produces the "never retrieved" log.
+- **Impact:** low. A dropped connection surfaces as an unexpected
+  exception type instead of a `ConnectionDoesNotExistError`, which can
+  turn a retryable failure into a crash in code that catches asyncpg's
+  documented errors. No data is mixed up and the pool recovers.
+- **Feasibility:** both reproduce with `asyncio.run` over real localhost
+  sockets; the simulated run hits the free-holder case only under fifo
+  scheduling with timer jitter, where a reset lands between the block's
+  last query and its exit.
+- **Upstream status:** searched MagicStack/asyncpg issues and pull requests
+  for "free connection holder" and `InternalClientError` release on
+  2026-11-19; no matching report (#1307 is a different pool problem). Not
+  reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

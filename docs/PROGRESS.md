@@ -38,6 +38,15 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   redis-py reply-integrity harness against valkey-py 6.2.0 was clean (500
   seeds, random and fifo, with `strict_cancellation`); not kept as a
   harness.
+- asyncpg 0.32.0 under a PostgreSQL wire-protocol simulator
+  (`findings/_pg.py`: startup, prepared statements, reset query,
+  `CancelRequest`; asyncpg runs on it unmodified) with timeouts, resets and
+  crashes: replies always matched their queries and the pool always
+  recovered, but a connection lost as `async with pool.acquire()` exits
+  makes release raise `InternalClientError` ("called on a free connection
+  holder"), and a caller cancelled during a failing release leaves a
+  "Task exception was never retrieved" log (confirmed on real asyncio, not
+  reported; low impact).
 - Clean harnesses: psycopg-pool 3.3.3 `AsyncConnectionPool` (stand-in
   connection class), aio-pika 10.2.3 `Pool`, aiologic 0.17.1 `Lock`,
   `Semaphore` and `Queue`.

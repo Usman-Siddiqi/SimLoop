@@ -31,3 +31,4 @@ psycopg[binary]==3.3.9
 psycopg-pool==3.3.3
 aio-pika==10.2.3
 aiologic==0.17.1
+asyncpg==0.32.0
