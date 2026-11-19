@@ -311,7 +311,13 @@ class Network:
         both_ways: bool = True,
         **changes: Any,
     ) -> None:
-        """Configure traffic from ``a`` to ``b`` (and back, unless ``both_ways=False``)."""
+        """Configure traffic from ``a`` to ``b`` (and back, unless ``both_ways=False``).
+
+        Keyword changes apply on top of the link's current settings, so a
+        ``reset`` or ``drop`` set earlier stays in force until it is set back
+        to 0; pass a fresh ``LinkConfig`` to start from the defaults.
+        :meth:`heal` removes partitions only.
+        """
         src, dst = _name(a), _name(b)
         base = config or self.link(src, dst)
         updated = base.replace(**changes) if changes else base

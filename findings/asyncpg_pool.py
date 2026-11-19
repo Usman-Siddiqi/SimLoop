@@ -77,7 +77,7 @@ async def harness() -> None:
     await asyncio.wait_for(asyncio.gather(*(worker(n) for n in range(4))), 60)
     nemesis.cancel()
     net.heal()
-    net.set_link("main", "db", latency=0.001)
+    net.set_link("main", "db", latency=0.001, reset=0.0)
     if not net.host("db").up:
         net.host("db").restart()
     await asyncio.sleep(1)

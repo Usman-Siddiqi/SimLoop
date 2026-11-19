@@ -59,7 +59,7 @@ async def workload() -> None:
             tg.create_task(worker(n))
     nemesis.cancel()
     net.heal()
-    net.set_link("main", "db", latency=0.001)
+    net.set_link("main", "db", latency=0.001, reset=0.0)
     db = net.host("db")
     if not db.up:
         db.restart()
