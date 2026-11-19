@@ -817,6 +817,42 @@ here. Rules (see `CLAUDE.md`):
   "if the aborted job is not found"; it does not identify the cause. Nothing
   found for (2) (#343 is about workers that crash). Not reported.
 
+### 20. grpclib 0.4.9: a stream reset before its handler starts leaks the stream and its flow-control window (known upstream)
+
+- **Library:** [grpclib](https://pypi.org/project/grpclib/) 0.4.9 (latest
+  release), server and client, with a JSON codec instead of protobuf.
+- **Reproduction:** [`findings/grpclib_reset_leak.py`](../findings/grpclib_reset_leak.py)
+  (the SimLoop harness and a plain-asyncio reproduction).
+- **Seeds:** 4 clients, 15 unary calls each with 0, 100 or 70,000-byte
+  payloads, under the call's own timeout (1-100 ms or none) or an outer
+  `asyncio.wait_for` (0-50 ms). "Once every call has finished, the server
+  holds none of their HTTP/2 streams" fails on 26 of seeds 0-99 with the
+  default scheduler (first seed 15) and on 16 with `scheduler="fifo",
+  timer_jitter=0.001` (first seed 0). With the stream released for a
+  handler task cancelled before its first step, it passes on all 200.
+- **Property violated:** a finished call releases its stream, and the
+  server acknowledges the DATA it received, so the connection's receive
+  window is not used up.
+- **Explanation:** when `HEADERS`, `DATA` and `RST_STREAM` for one stream
+  are handled in the same `data_received` call (a client that sends a
+  request and gives up straight away), `Handler.accept` creates the request
+  handler task and `Handler.cancel` cancels it before it has run. asyncio
+  never enters a coroutine cancelled that early, so `request_handler`'s
+  `finally: release_stream()` does not run: the stream stays in
+  `EventsProcessor.streams` and the DATA it buffered is never acknowledged.
+  Each such call takes its request size out of the connection's receive
+  window for good. On plain asyncio, 64 calls that each sent 60 KB and gave
+  up at once all left their stream registered, and the window fell from
+  4,194,272 to 351,776 bytes; once it reaches zero the connection carries
+  no more request data.
+- **Impact:** high for long-lived connections with clients that cancel
+  calls: the server's memory grows and the connection ends up accepting
+  streams but no data.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** already known: vmagamedov/grpclib#217 (open,
+  2026-08-10) describes exactly this, and PR #218 (open) fixes it.
+  Rediscovered here by a generic check (no stream outlives its call).
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
@@ -1064,3 +1100,11 @@ properties and fault mixes only.
   `strict_cancellation=True`. The bucket's leak ran in an event-loop task
   (the bucket marked async) instead of its usual background thread, so
   races with that thread were not covered.
+- **grpclib 0.4.9 (server and client)**, [`findings/grpclib_reset_leak.py`](../findings/grpclib_reset_leak.py),
+  with the #217 leak fixed in the harness: unary, server-streaming and
+  bidirectional calls under per-call deadlines, 0.2% TCP resets per
+  segment and server crashes every 0.3-1.5 s. Every reply matched its
+  request, no call outlived its deadline by more than 50 ms, the channel
+  recovered after faults stopped and every server handler exited; 100
+  seeds each with `random` and `fifo` plus 1 ms jitter. Calls without a
+  deadline were left out (open issue #216 covers a hang there).

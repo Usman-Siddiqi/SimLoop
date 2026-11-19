@@ -76,6 +76,12 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   asyncio with SIGINT, not reported). arq pins `redis<6`, so CI runs any
   `findings/<name>.py` that has a `findings/requirements-<name>.txt` in its
   own environment (job `findings-isolated`).
+- grpclib 0.4.9, client and server on the simulated network: a generic
+  "no stream outlives its call" check rediscovered the known open #217 (a
+  stream reset before its handler task first runs is never released, and
+  its DATA is lost from the connection window). With that fixed in the
+  harness, deadlines, reply integrity and handler cleanup held under
+  crashes and resets (clean).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.
