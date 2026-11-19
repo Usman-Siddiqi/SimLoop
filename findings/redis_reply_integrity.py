@@ -1,7 +1,10 @@
 """redis-py asyncio: every reply goes to the request that asked for it.
 
 Random client timeouts, injected TCP resets and server crashes; afterwards the
-client must recover and leave no pooled connection marked in use. Clean on
+client must recover and leave no pooled connection marked in use, and the
+pool never holds more than ``max_connections``. Run with ``ConnectionPool``
+and with ``BlockingConnectionPool`` (``max_connections=2``, six workers,
+pool timeout none, 50 ms or 1 s). Clean on
 redis 8.1.0 (see docs/FINDINGS.md, "Tested, nothing found").
 
 Run: python findings/redis_reply_integrity.py
@@ -22,15 +25,23 @@ from simloop import faults
 CMD_ERRORS = (TimeoutError, RedisError, ConnectionError, OSError)
 
 
-async def workload() -> None:
+async def workload(blocking: bool = False) -> None:
     net = simloop.network()
     server = RespServer(slow=0.05)
     net.add_host("db", entry=server.serve)
     net.set_link("main", "db", latency=(0.001, 0.01), reset=0.01)
     await asyncio.sleep(0.01)
-    pool = redis.ConnectionPool(host="db", port=6379, max_connections=4, protocol=2)
-    client = redis.Redis(connection_pool=pool)
     rng = simloop.rng()
+    limit = 2 if blocking else 4
+    pool: redis.ConnectionPool
+    if blocking:
+        timeout = rng.choice([None, 0.05, 1.0])
+        pool = redis.BlockingConnectionPool(
+            host="db", port=6379, max_connections=limit, protocol=2, timeout=timeout
+        )
+    else:
+        pool = redis.ConnectionPool(host="db", port=6379, max_connections=limit, protocol=2)
+    client = redis.Redis(connection_pool=pool)
     nemesis = asyncio.create_task(
         faults.random_crashes(["db"], every=(0.3, 1.5), downtime=(0.05, 0.3))
     )
@@ -53,9 +64,11 @@ async def workload() -> None:
                     assert reply == token.encode(), f"asked for {token!r}, got {reply!r}"
             except CMD_ERRORS as exc:
                 simloop.log(f"{token}: {type(exc).__name__}")
+            total = len(pool._in_use_connections) + len(pool._available_connections)
+            assert total <= limit, f"the pool holds {total} connections, max {limit}"
 
     async with asyncio.TaskGroup() as tg:
-        for n in range(4):
+        for n in range(6 if blocking else 4):
             tg.create_task(worker(n))
     nemesis.cancel()
     net.heal()
@@ -78,10 +91,22 @@ async def workload() -> None:
     await client.aclose()
 
 
+async def blocking_workload() -> None:
+    await workload(blocking=True)
+
+
 def main() -> int:
     report = simloop.explore(workload, seeds=range(200))
-    print(report.summary())
-    return 0 if report.ok else 1
+    print(f"ConnectionPool: {report.summary()}")
+    ok = report.ok
+    for scheduler in ("random", "fifo"):
+        config = simloop.SimConfig(scheduler=scheduler)
+        if scheduler == "fifo":
+            config = config.replace(timer_jitter=0.001)
+        blocking = simloop.explore(blocking_workload, seeds=range(200), config=config)
+        print(f"BlockingConnectionPool, {scheduler}: {blocking.summary()}")
+        ok = ok and blocking.ok
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -1250,7 +1250,10 @@ properties and fault mixes only.
   with random client timeouts (`asyncio.wait_for`), 1% injected TCP resets
   per segment and server process crashes every 0.3-1.5 s; the client
   recovered after faults stopped and the pool had no connections stuck in
-  use. (The 2023 cancellation bug, CVE-2023-28858/28859, is fixed.)
+  use. (The 2023 cancellation bug, CVE-2023-28858/28859, is fixed.) The
+  same mix against `BlockingConnectionPool` (`max_connections=2`, six
+  workers, pool timeout none, 50 ms or 1 s) was clean too: never more than
+  2 connections, none stuck in use, 200 seeds each, random and fifo.
 - **aiohttp 3.14.5**, [`findings/aiohttp_pool.py`](../findings/aiohttp_pool.py):
   every response matched its request, the pool served `limit` concurrent
   requests after faults stopped, and no connection stayed acquired, across
