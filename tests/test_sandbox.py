@@ -248,6 +248,54 @@ def test_time_functions_imported_by_name_are_simulated() -> None:
     assert vars(support_time)["urandom"] is os.urandom
 
 
+def test_clocks_held_in_classes_defaults_and_closures_are_simulated() -> None:
+    from . import support_time
+
+    async def main() -> tuple[float, ...]:
+        await asyncio.sleep(60)
+        timer = support_time.timer
+        assert callable(timer)
+        return (
+            support_time.Stamp().at,
+            support_time.Clock.now(),
+            support_time.elapsed(0.0),
+            timer(),
+        )
+
+    assert run_ok(main).value == (60.0, 60.0, 60.0, 60.0)
+    real = time.monotonic
+    assert support_time.Stamp.__dataclass_fields__["at"].default_factory is real
+    assert vars(support_time.Clock)["now"] is real
+    assert support_time.elapsed.__defaults__ == (real,)
+    before = time.monotonic()
+    assert before <= support_time.Stamp().at <= time.monotonic()
+
+
+def test_a_late_import_keeps_real_clocks_in_dataclass_fields() -> None:
+    late = types.ModuleType("simloop_test_late_dataclass")
+
+    async def main() -> float:
+        sys.modules[late.__name__] = late
+        exec(
+            "import dataclasses, time\n"
+            "@dataclasses.dataclass\n"
+            "class Stamp:\n"
+            "    at: float = dataclasses.field(default_factory=time.monotonic)\n",
+            vars(late),
+        )
+        await asyncio.sleep(5)
+        return float(late.Stamp().at)
+
+    try:
+        assert run_ok(main).value == 5.0
+        field = late.Stamp.__dataclass_fields__["at"]
+        assert field.default_factory is time.monotonic
+        before = time.monotonic()
+        assert before <= late.Stamp().at <= time.monotonic()
+    finally:
+        sys.modules.pop(late.__name__, None)
+
+
 def test_a_module_imported_inside_the_run_keeps_the_real_functions() -> None:
     late = types.ModuleType("simloop_test_late_import")
 

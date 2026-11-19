@@ -11,8 +11,9 @@ Two mechanisms:
   returns seeded bytes.
   Everything is restored on exit. Third-party modules that imported these
   functions by name (``from time import monotonic``) have those module
-  globals swapped too; references kept anywhere else (default arguments,
-  closures, class attributes) and in the standard library are not.
+  globals swapped too, and so are references held in their classes'
+  attributes, dataclass ``default_factory`` fields, default arguments and
+  closures; references in the standard library are not.
 * An audit hook (PEP 578) rejects real sockets, DNS, threads and subprocesses
   while a sandbox is active on the current thread, and records the leak so
   the run fails even if the code catches the exception.
@@ -29,7 +30,8 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterable
-from types import ModuleType, TracebackType
+from dataclasses import Field
+from types import CellType, FunctionType, ModuleType, TracebackType
 from typing import Any
 
 from . import _vdatetime
@@ -87,11 +89,83 @@ _KEEP_REAL = frozenset(sys.stdlib_module_names) | {
     "coverage",
 }
 _captured_scanned: set[str] = set()
-_captured: list[tuple[ModuleType, str, object]] = []
 
 
-def _scan_captured(names: Iterable[str]) -> list[tuple[ModuleType, str, object]]:
-    found: list[tuple[ModuleType, str, object]] = []
+class _Ref:
+    """One place that holds a capturable function: a module or class attribute,
+    a dataclass field's ``default_factory``, a closure cell or a default argument."""
+
+    __slots__ = ("holder", "key")
+
+    def __init__(self, holder: Any, key: str | int | None) -> None:
+        self.holder = holder
+        self.key = key
+
+    def get(self) -> object:
+        holder, key = self.holder, self.key
+        if isinstance(holder, CellType):
+            try:
+                return holder.cell_contents
+            except ValueError:
+                return None
+        if isinstance(key, int):
+            defaults = holder.__defaults__ or ()
+            return defaults[key] if key < len(defaults) else None
+        if isinstance(holder, FunctionType):
+            return (holder.__kwdefaults__ or {}).get(str(key))
+        return getattr(holder, str(key), None)
+
+    def set(self, value: object) -> None:
+        holder, key = self.holder, self.key
+        if isinstance(holder, CellType):
+            holder.cell_contents = value
+        elif isinstance(key, int):
+            defaults = list(holder.__defaults__)
+            defaults[key] = value
+            holder.__defaults__ = tuple(defaults)
+        elif isinstance(holder, FunctionType):
+            holder.__kwdefaults__ = {**(holder.__kwdefaults__ or {}), str(key): value}
+        else:
+            setattr(holder, str(key), value)
+
+
+_captured: list[tuple[_Ref, object]] = []
+
+
+def _scan_captured(names: Iterable[str], table: dict[int, object]) -> list[tuple[_Ref, object]]:
+    """Find every reference to a function in ``table`` held by the named modules."""
+    found: list[tuple[_Ref, object]] = []
+    seen: set[int] = set()
+
+    def hit(value: object) -> bool:
+        return id(value) in table and table[id(value)] is value
+
+    def function(fn: FunctionType, depth: int) -> None:
+        if id(fn) in seen or depth > 3:
+            return
+        seen.add(id(fn))
+        for index, value in enumerate(fn.__defaults__ or ()):
+            if hit(value):
+                found.append((_Ref(fn, index), value))
+        for name, value in (fn.__kwdefaults__ or {}).items():
+            if hit(value):
+                found.append((_Ref(fn, name), value))
+        for cell in fn.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if hit(value):
+                found.append((_Ref(cell, None), value))
+            elif isinstance(value, FunctionType):
+                function(value, depth + 1)
+
+    def member(value: object, depth: int) -> None:
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, FunctionType):
+            function(value, depth)
+
     for name in names:
         module = sys.modules.get(name)
         if not isinstance(module, ModuleType) or name.partition(".")[0] in _KEEP_REAL:
@@ -101,8 +175,23 @@ def _scan_captured(names: Iterable[str]) -> list[tuple[ModuleType, str, object]]
         except TypeError:
             continue
         for attr, value in items:
-            if id(value) in _CAPTURABLE and _CAPTURABLE[id(value)] is value:
-                found.append((module, attr, value))
+            if hit(value):
+                found.append((_Ref(module, attr), value))
+            elif isinstance(value, type) and getattr(value, "__module__", None) == name:
+                if id(value) in seen:
+                    continue
+                seen.add(id(value))
+                for key, inner in list(vars(value).items()):
+                    if hit(inner):
+                        found.append((_Ref(value, key), inner))
+                    else:
+                        member(inner, 0)
+                fields = vars(value).get("__dataclass_fields__")
+                for field in fields.values() if isinstance(fields, dict) else ():
+                    if isinstance(field, Field) and hit(field.default_factory):
+                        found.append((_Ref(field, "default_factory"), field.default_factory))
+            elif getattr(value, "__module__", None) == name:
+                member(value, 0)
     return found
 
 
@@ -143,7 +232,7 @@ class Sandbox:
         self.suspended = False
         self._saved: list[tuple[object, str, object]] = []
         self._datetime_undo: list[tuple[object, str, object]] = []
-        self._captured_undo: list[tuple[ModuleType, str, object]] = []
+        self._captured_undo: list[tuple[_Ref, object]] = []
         self._replacements: dict[int, object] = {}
         self._modules_before: frozenset[str] = frozenset()
         self._saved_env: dict[str, str] = {}
@@ -275,35 +364,25 @@ class Sandbox:
     def _install_captured(self) -> None:
         new = [name for name in list(sys.modules) if name not in _captured_scanned]
         _captured_scanned.update(new)
-        _captured.extend(_scan_captured(new))
-        for module, attr, original in _captured:
-            if getattr(module, attr, None) is original:
-                setattr(module, attr, self._replacements[id(original)])
-                self._captured_undo.append((module, attr, original))
+        _captured.extend(_scan_captured(new, _CAPTURABLE))
+        for ref, original in _captured:
+            if ref.get() is original:
+                ref.set(self._replacements[id(original)])
+                self._captured_undo.append((ref, original))
         self._modules_before = frozenset(sys.modules)
 
     def _uninstall_captured(self) -> None:
-        for module, attr, original in reversed(self._captured_undo):
-            if getattr(module, attr, None) is self._replacements[id(original)]:
-                setattr(module, attr, original)
+        for ref, original in reversed(self._captured_undo):
+            if ref.get() is self._replacements[id(original)]:
+                ref.set(original)
         self._captured_undo.clear()
         # A module first imported inside the run captured the simulated
         # function; point it back at the real one so it outlives the run.
         originals = {id(new): _CAPTURABLE[key] for key, new in self._replacements.items()}
-        for name in [name for name in list(sys.modules) if name not in self._modules_before]:
-            loaded = sys.modules.get(name)
-            if not isinstance(loaded, ModuleType):
-                continue
-            try:
-                items = list(vars(loaded).items())
-            except TypeError:
-                continue
-            for attr, value in items:
-                if (
-                    id(value) in originals
-                    and self._replacements.get(id(originals[id(value)])) is value
-                ):
-                    setattr(loaded, attr, originals[id(value)])
+        replacements = {id(new): new for new in self._replacements.values()}
+        late = [name for name in list(sys.modules) if name not in self._modules_before]
+        for ref, replacement in _scan_captured(late, replacements):
+            ref.set(originals[id(replacement)])
 
     # -- context manager -------------------------------------------------------
 
