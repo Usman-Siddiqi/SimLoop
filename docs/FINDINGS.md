@@ -853,6 +853,50 @@ here. Rules (see `CLAUDE.md`):
   2026-08-10) describes exactly this, and PR #218 (open) fixes it.
   Rediscovered here by a generic check (no stream outlives its call).
 
+### 21. aiomysql 0.3.2: releasing a closed connection wakes no pool waiter, so `acquire()` hangs
+
+- **Library:** [aiomysql](https://pypi.org/project/aiomysql/) 0.3.2 (latest
+  release, 2025-10-22; `Pool.release` is unchanged on the upstream default
+  branch), with PyMySQL 1.2.4.
+- **Reproduction:** [`findings/aiomysql_pool_wakeup.py`](../findings/aiomysql_pool_wakeup.py)
+  (the SimLoop harness and a plain-asyncio reproduction), against the
+  simulated MySQL server in [`findings/_mysql.py`](../findings/_mysql.py)
+  (handshake, `COM_QUERY` result sets, `COM_PING`, transaction status).
+- **Seeds:** 6 workers share `create_pool(minsize=0, maxsize=2)` and run 10
+  `SELECT SLEEP(t), '<token>'` queries each, 30% of them under a 0-50 ms
+  `asyncio.wait_for`, 5% leaving a transaction open. "Every worker finishes
+  within 60 s" (a fault-free run takes about 1.5 s) fails on 4 of seeds
+  0-199 with the default scheduler (first seed 36) and on 9 with
+  `scheduler="fifo", timer_jitter=0.001` (first seed 14); in each, a
+  worker waits in `acquire()` while the pool holds 0 of 2 connections.
+  With `release` waking a waiter in those cases too, all 400 runs pass.
+  Every reply matched its token and the pool never exceeded `maxsize`.
+- **Property violated:** an `acquire()` waiting for a full pool gets a
+  connection once the pool has room.
+- **Explanation:** `Pool.release` schedules `_wakeup()` (a `notify()` on
+  the pool's condition) only when it returns the connection to the free
+  list. Two other paths remove the connection from `_used` and return
+  without notifying: a connection that is already closed, which is what a
+  cancelled query leaves (aiomysql closes the connection when a read is
+  cancelled) as well as a broken one; and a connection still in a
+  transaction, which `release` closes. The pool shrinks, but a caller
+  blocked in `Condition.wait()` inside `_acquire` is not told, and only the
+  next normal release wakes it. On plain asyncio, with `maxsize=1`, a
+  second caller waiting in `acquire()` was still waiting 2 s later, with
+  the pool empty, after the holder's query was cancelled by `wait_for`, and
+  likewise after the holder released a connection with a transaction open.
+- **Impact:** high where queries run under timeouts (any web handler with
+  a request timeout): once the cancelled holders outnumber normal releases
+  at the right moment, callers without their own timeout hang forever and
+  the others time out, although the pool is empty.
+- **Feasibility:** deterministic on plain asyncio.
+- **Upstream status:** no issue describes this cause. #553 ("Pool.acquire()
+  hanging after a while", closed, 2020) reports the symptom without a
+  cause. Open PR #982 (2024) proposes to "notify connection pool in any
+  case, even if an exception happened during the connection", which is
+  about failed connects in `_fill_free_pool`; we could not see whether its
+  diff touches `release`. Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call

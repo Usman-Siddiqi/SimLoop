@@ -82,6 +82,11 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   its DATA is lost from the connection window). With that fixed in the
   harness, deadlines, reply integrity and handler cleanup held under
   crashes and resets (clean).
+- New simulated MySQL server (`findings/_mysql.py`: handshake, result
+  sets, `SLEEP`, transaction status). aiomysql 0.3.2: `Pool.release` of a
+  closed connection (a cancelled query closes it) or one still in a
+  transaction wakes no waiter, so `acquire()` hangs with the pool empty
+  (confirmed on plain asyncio, not reported).
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

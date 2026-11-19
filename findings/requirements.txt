@@ -43,3 +43,5 @@ pyrate-limiter==4.5.1
 aio-throttle==1.7.0
 aiochannel==1.4.1
 grpclib==0.4.9
+aiomysql==0.3.2
+PyMySQL==1.2.4
