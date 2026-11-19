@@ -17,7 +17,7 @@ import socket
 import sys
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .errors import UnsupportedOperation
 from .net import Host, Network
@@ -363,17 +363,18 @@ class StreamTransport(asyncio.Transport):
             self._network._record(
                 self._host.name, "recv", f"{self._incoming_label} {len(payload)}B"
             )
+            # asyncio only checks for BufferedProtocol and duck-types the
+            # rest: protocols need not subclass asyncio.Protocol (asyncssh's
+            # port forwarders do not).
             if isinstance(protocol, asyncio.BufferedProtocol):
                 self._fill_buffers(protocol, payload)
             else:
-                assert isinstance(protocol, asyncio.Protocol)
-                protocol.data_received(payload)
+                cast(Any, protocol).data_received(payload)
         elif kind == "fin":
             self._eof_received = True
             if self._closing:
                 return
-            assert isinstance(protocol, (asyncio.Protocol, asyncio.BufferedProtocol))
-            keep_open = protocol.eof_received()
+            keep_open = cast(Any, protocol).eof_received()
             if not keep_open:
                 self.close()
 
@@ -613,8 +614,7 @@ class DatagramEndpoint(asyncio.DatagramTransport):
         return self._protocol
 
     def set_protocol(self, protocol: asyncio.BaseProtocol) -> None:
-        assert isinstance(protocol, asyncio.DatagramProtocol)
-        self._protocol = protocol
+        self._protocol = protocol  # type: ignore[assignment]
 
     def is_closing(self) -> bool:
         return self._closing

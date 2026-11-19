@@ -762,3 +762,34 @@ def test_buffered_protocol_receives_through_its_buffer(pause_once: bool) -> None
     assert (elapsed >= 0.5) is pause_once
     again = run_ok(main)
     assert again.digest == result.digest
+
+
+class DuckProtocol(asyncio.BaseProtocol):
+    """A stream protocol that, like asyncssh's port forwarders, is not an
+    ``asyncio.Protocol`` subclass: asyncio only duck-types these methods."""
+
+    def __init__(self) -> None:
+        self.received = b""
+        self.done: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+
+    def data_received(self, data: bytes) -> None:
+        self.received += data
+
+    def eof_received(self) -> bool:
+        self.done.set_result(self.received)
+        return False
+
+
+def test_stream_protocol_need_not_subclass_protocol() -> None:
+    async def main() -> bytes:
+        net = simloop.network()
+        net.add_host("echo", entry=echo_server())
+        await asyncio.sleep(0.01)
+        protocol = DuckProtocol()
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_connection(lambda: protocol, "echo", 7000)
+        transport.write(b"hello\n")
+        transport.write_eof()
+        return await protocol.done
+
+    assert run_ok(main).value == b"echo hello\n"
