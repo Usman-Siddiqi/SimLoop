@@ -1024,6 +1024,32 @@ here. Rules (see `CLAUDE.md`):
   timeout" on 2026-11-18 (issue #177 is a different `tee` bug, fixed). Not
   reported.
 
+### uvicorn 0.54.0: `lifespan.shutdown` is sent while cancelled request tasks and their connections are still open
+
+- **Library:** [uvicorn](https://pypi.org/project/uvicorn/) 0.54.0 (latest
+  release; `Server.shutdown` is unchanged on the upstream default branch),
+  with Starlette 1.10.0.
+- **Reproduction:** `plain_uvicorn()` in
+  [`findings/aiohttp_graceful_shutdown.py`](../findings/aiohttp_graceful_shutdown.py)
+  (plain asyncio).
+- **Observed:** with `timeout_graceful_shutdown=0.5` and a handler that
+  sleeps 10 s and spends 0.1 s cleaning up when cancelled, uvicorn cancels
+  the request task 0.7 s after `should_exit` (on time, allowing for its
+  0.1 s polling), then immediately runs the lifespan shutdown and returns
+  from `serve()`. The handler finishes cleaning up 0.1 s later, and only
+  then does the client get its 500 response, over a connection that was
+  still open during the lifespan shutdown.
+- **Why it is only suspected:** uvicorn documents only that after the
+  timeout "the server will start terminating requests". The ASGI lifespan
+  spec says `lifespan.shutdown` is "sent to the application when the server
+  has stopped accepting connections and closed all active connections",
+  which this contradicts, but whether uvicorn should wait for cancelled
+  tasks (and how long) is a design question. The effect is the same as in
+  aiohttp's #22: shutdown code that closes pools can run while cancelled
+  handlers still use them.
+- **Upstream status:** nothing found in Kludex/uvicorn issues or PRs about
+  waiting for cancelled tasks before the lifespan shutdown. Not reported.
+
 ## False positives
 
 ### aiolimiter 1.3.0: `AsyncLimiter` spins at a fixed instant

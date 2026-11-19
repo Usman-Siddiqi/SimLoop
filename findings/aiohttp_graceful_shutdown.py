@@ -22,17 +22,32 @@ then does it call ``task.cancel()``, and it returns without waiting, so
 ``on_cleanup`` runs, and ``cleanup()`` returns, while the cancelled
 handlers are still running their ``except``/``finally`` code.
 
+uvicorn 0.54.0 has a milder form, logged as a suspected issue: with
+``timeout_graceful_shutdown`` it cancels the request tasks on time but sends
+the lifespan shutdown event without waiting for them, while their
+connections are still open, although the ASGI spec sends
+``lifespan.shutdown`` once the server "has closed all active connections".
+``plain_uvicorn`` shows it.
+
 Run: python findings/aiohttp_graceful_shutdown.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
+from collections.abc import AsyncIterator
 
 import aiohttp
+import httpx
+import uvicorn
 from aiohttp import web
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 import simloop
 
@@ -160,6 +175,52 @@ async def plain() -> list[tuple[float, str]]:
     return events
 
 
+async def plain_uvicorn() -> list[tuple[float, str]]:
+    """The same handler under uvicorn with ``timeout_graceful_shutdown``."""
+    events: list[tuple[float, str]] = []
+    loop = asyncio.get_running_loop()
+    started = 0.0
+
+    def mark(what: str) -> None:
+        events.append((round(loop.time() - started, 1), what))
+
+    async def slow(request: Request) -> PlainTextResponse:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            mark("handler cancelled")
+            await asyncio.sleep(0.1)
+            mark("handler finished cleaning up")
+            raise
+        return PlainTextResponse("")
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        yield
+        mark("lifespan shutdown")
+
+    app = Starlette(routes=[Route("/", slow)], lifespan=lifespan)
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=0, timeout_graceful_shutdown=TIMEOUT, log_level="critical"
+    )
+    server = uvicorn.Server(config)
+    serving = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    async with httpx.AsyncClient() as client:
+        request = asyncio.create_task(client.get(f"http://127.0.0.1:{port}/"))
+        await asyncio.sleep(0.2)
+        started = loop.time()
+        mark("should_exit set")
+        server.should_exit = True
+        await serving
+        mark("serve() returned")
+        response = (await asyncio.gather(request, return_exceptions=True))[0]
+        mark(f"client got {getattr(response, 'status_code', type(response).__name__)}")
+    return events
+
+
 def main() -> int:
     for scheduler in ("random", "fifo"):
         config = simloop.SimConfig(scheduler=scheduler)
@@ -179,6 +240,13 @@ def main() -> int:
     assert {w: t for t, w in events}["handler cancelled"] >= 2 * TIMEOUT
     assert order.index("on_cleanup") < order.index("handler finished cleaning up")
     assert order.index("cleanup() returned") < order.index("handler finished cleaning up")
+    events = asyncio.run(plain_uvicorn())
+    print(f"real asyncio loop, uvicorn timeout_graceful_shutdown={TIMEOUT}:")
+    for when, what in events:
+        print(f"  {when:4.1f} s  {what}")
+    order = [what for _, what in events]
+    assert order.index("lifespan shutdown") < order.index("handler finished cleaning up")
+    assert order.index("lifespan shutdown") < order.index("client got 500")
     return 0
 
 
