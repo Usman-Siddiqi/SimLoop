@@ -97,6 +97,14 @@ Newest session first. Each entry: done, in progress, known issues, next steps.
   asyncio, not reported). uvicorn 0.54.0 cancels on time but also starts
   the lifespan shutdown without waiting for the cancelled tasks (suspected:
   contradicts the ASGI lifespan spec, not uvicorn's own docs).
+- aiomisc 18.0.40 `PoolBase` (the base for user-defined pools): a failed
+  connect keeps its semaphore slot, so `maxsize` failures kill the pool for
+  good; a raising health check recycles the instance and then returns it
+  anyway; an acquire cancelled mid-check or mid-connect loses the instance
+  or slot; recycling an expired instance on release wakes no waiter (all
+  four confirmed on plain asyncio, and a patched pool passes every
+  workload; not reported).
+- The findings CI job runs in four shards.
 - Flaky test fixed: the "explore flags leaking real time" test used real
   `perf_counter` noise, which can be 0 under coarse clock resolution (it
   failed once on 3.12 in CI); it now uses real `os.urandom`.

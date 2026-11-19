@@ -944,6 +944,76 @@ here. Rules (see `CLAUDE.md`):
   no issue found about the late cancellation or the missing wait (#8179 and
   #8448 are about background tasks and cleanup contexts). Not reported.
 
+### 23. aiomisc 18.0.40: `PoolBase` loses capacity for good and hands out recycled instances
+
+- **Library:** [aiomisc](https://pypi.org/project/aiomisc/) 18.0.40 (latest
+  release), `aiomisc.PoolBase`, the base class for user-defined pools.
+- **Reproduction:** [`findings/aiomisc_pool.py`](../findings/aiomisc_pool.py)
+  (the SimLoop harness, a patched pool as a control, and plain-asyncio
+  reproductions).
+- **Seeds:** a `PoolBase` subclass with `maxsize=2` hands fake connections
+  to 6 workers doing 10 acquire/use/release rounds each. One workload per
+  kind of trouble; seeds 0-99, default scheduler / `scheduler="fifo",
+  timer_jitter=0.001`:
+  - 30% of connects fail: 5 / 11 runs hang (first seeds 74 / 2) with every
+    worker waiting in `acquire()` and no connection open;
+  - 5% of health checks raise: 94 / 92 runs fail (first seed 0 / 0):
+    `acquire()` returns a closed connection, a connection is closed while
+    in use, or the pool holds 3-4 connections;
+  - 30% of rounds under a 0-20 ms `asyncio.wait_for`: 4 / 11 runs hang
+    (first seeds 31 / 34) with every worker waiting and both slots taken by
+    connections nobody holds;
+  - `recycle=0.05`: 5 / 9 runs hang (first seeds 63 / 16) with a worker
+    waiting and no connection open.
+
+  The same workloads without faults pass on all 200 runs, and with the four
+  fixes below applied to `PoolBase` every workload passes all 200.
+- **Property violated:** an acquired instance is usable and not shared, the
+  pool holds at most `maxsize` instances, and an `acquire()` is served once
+  the pool has room.
+- **Explanation:** four separate defects in `PoolBase.__acquire` and its
+  helpers:
+  - `__create_new_instance` takes a semaphore slot and then awaits
+    `_create_instance()`. If that raises, the slot is never given back. After
+    `maxsize` failed connects (a database that is down at startup) the
+    semaphore stays locked with no instances, and every later `acquire()`
+    waits on the empty instance queue for good, even after the database is
+    back.
+  - When `_check_instance()` raises, `__acquire` logs it and recycles the
+    instance (frees its slot and queues it for `_destroy_instance`), then
+    falls through and returns it to the caller anyway. The recycler closes it
+    under the caller, and the caller's release puts it back in the queue,
+    where the next caller gets the closed instance; meanwhile the freed slot
+    has been used to create a replacement, so the pool holds more than
+    `maxsize`. (The `False` branch does it right: it recycles and retries.)
+  - A caller cancelled during `_check_instance()` has already taken the
+    instance off the queue, and nothing puts it back or recycles it; one
+    cancelled during `_create_instance()` keeps the slot. Each such
+    cancellation permanently removes one instance from circulation.
+  - `__release` recycles an instance past its `recycle` deadline, which
+    frees a slot, but a caller already waiting in `self._instances.get()`
+    only checked for a free slot before it started waiting, so it is not
+    woken: it waits until some later caller creates an instance.
+
+  On plain asyncio with `maxsize=1`: after one failed connect, the next
+  `acquire()` is not served within 1 s although connects now succeed; when
+  the check raises once, the caller holds an instance that is closed 10 ms
+  later, and the next caller gets that same closed instance; after one
+  acquire that times out during a 1 s check, the next `acquire()` is not
+  served within 1 s; with `recycle=0.1`, a caller waiting when the holder
+  releases the expired instance is not served within 1.3 s.
+- **Impact:** moderate to high for code built on `PoolBase`: a brief outage
+  at startup, or `maxsize` timed-out acquires, leaves a pool that never
+  serves again, and a flaky health check hands out connections that are
+  being closed.
+- **Feasibility:** each is deterministic on plain asyncio (the scripts
+  above), and each hang also reproduces with `scheduler="fifo"` plus timer
+  jitter.
+- **Upstream status:** searches of aiokitchen/aiomisc issues and pull
+  requests for "pool" and "recycle" on 2026-11-19 found nothing about these
+  (the only pool pull requests are the original implementation, #64, and
+  #65, "pool fixes", both closed). Not reported.
+
 ## Suspected issues
 
 ### aiocache 0.12.3: `cached_stampede` stops protecting after a failed call
